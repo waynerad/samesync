@@ -687,19 +687,15 @@ func TestMarshalling(t *testing.T) {
 
 	rpc.AddColumn("Param1", ColInt)
 	rpc.AddColumn("Param2", ColUint)
-	rpc.AddColumn("Param3", ColFloat)
-	rpc.AddColumn("Param4", ColString)
-	rpc.AddColumn("Param5", ColByteArray)
-
-	// rpc.AddColumn("", ColInt)
-	// rpc.AddColumn("", ColUint)
-	// rpc.AddColumn("", ColFloat)
-	// rpc.AddColumn("", ColString)
-	// rpc.AddColumn("", ColByteArray)
+	rpc.AddColumn("Param3", ColBool)
+	rpc.AddColumn("Param4", ColFloat)
+	rpc.AddColumn("Param5", ColString)
+	rpc.AddColumn("Param6", ColByteArray)
 
 	rpc.StartRow()
 	rpc.AddRowColumnInt(int64(-555))
 	rpc.AddRowColumnUint(uint64(777))
+	rpc.AddRowColumnBool(false)
 	rpc.AddRowColumnFloat(897087.9783408)
 	rpc.AddRowColumnString("This is a string.")
 	rpc.AddRowColumnByteArray([]byte("TestBytes"))
@@ -707,6 +703,7 @@ func TestMarshalling(t *testing.T) {
 	rpc.StartRow()
 	rpc.AddRowColumnInt(int64(33))
 	rpc.AddRowColumnUint(uint64(7771))
+	rpc.AddRowColumnBool(true)
 	rpc.AddRowColumnFloat(3.5)
 	rpc.AddRowColumnString("This is actually a string.")
 	rpc.AddRowColumnByteArray([]byte("TestBytes1602"))
@@ -714,6 +711,7 @@ func TestMarshalling(t *testing.T) {
 	rpc.StartRow()
 	rpc.AddRowColumnInt(int64(-515))
 	rpc.AddRowColumnUint(uint64(787))
+	rpc.AddRowColumnBool(true)
 	rpc.AddRowColumnFloat(3.333111333)
 	rpc.AddRowColumnString("This is really a string.")
 	rpc.AddRowColumnByteArray([]byte("Bytes1609"))
@@ -734,7 +732,10 @@ func TestMarshalling(t *testing.T) {
 
 	// netConnection.Close()
 
-	rpc.MarshallDB()
+	err := rpc.MarshallDB()
+	if err != nil {
+		t.Error("Marshaller threw an error.")
+	}
 	var callback XWRPC
 	callback.message = rpc.message // hack for testing
 	callback.UnmarshallDB()
@@ -747,8 +748,8 @@ func TestMarshalling(t *testing.T) {
 		numCols := callback.GetNumCols(tblNum)
 		switch tblNum {
 		case 0:
-			if numCols != 5 {
-				t.Error("Number of columns on table 0 is not 5")
+			if numCols != 6 {
+				t.Error("Number of columns on table 0 is not 6")
 			}
 		case 1:
 			if numCols != 2 {
@@ -773,7 +774,6 @@ func TestMarshalling(t *testing.T) {
 					if colType != ColInt {
 						t.Error("colType is not ColInt")
 					}
-
 				case 1:
 					if colName != "Param2" {
 						t.Error("colName is not Param2")
@@ -781,38 +781,39 @@ func TestMarshalling(t *testing.T) {
 					if colType != ColUint {
 						t.Error("colType is not ColUint")
 					}
-
 				case 2:
 					if colName != "Param3" {
 						t.Error("colName is not Param3")
 					}
-					if colType != ColFloat {
-						t.Error("colType is not ColFloat")
+					if colType != ColBool {
+						t.Error("colType is not ColBool")
 					}
-
 				case 3:
 					if colName != "Param4" {
 						t.Error("colName is not Param4")
 					}
+					if colType != ColFloat {
+						t.Error("colType is not ColFloat")
+					}
+				case 4:
+					if colName != "Param5" {
+						t.Error("colName is not Param5")
+					}
 					if colType != ColString {
 						t.Error("colType is not ColString")
 					}
-
-				case 4:
-					if colName != "Param5" {
-						t.Error("colName is not Param4")
+				case 5:
+					if colName != "Param6" {
+						t.Error("colName is not Param6")
 					}
 					if colType != ColByteArray {
 						t.Error("colType is not ColByteArray")
 					}
-
 				default:
 					t.Error("Column number is invalid on table 0")
-
 				}
 			case 1:
 				switch colNum {
-
 				case 0:
 					if colName != "T2P1" {
 						t.Error("colName is not T2P1")
@@ -820,7 +821,6 @@ func TestMarshalling(t *testing.T) {
 					if colType != ColInt {
 						t.Error("colType is not ColInt")
 					}
-
 				case 1:
 					if colName != "T2P2" {
 						t.Error("colName is not T2P2")
@@ -834,13 +834,11 @@ func TestMarshalling(t *testing.T) {
 			default:
 				t.Error("table number is invalid")
 			}
-
 		}
 		numRows := callback.GetNumRows(tblNum)
 		for rowNum := 0; rowNum < numRows; rowNum++ {
 			for colNum := 0; colNum < numCols; colNum++ {
 				colType := callback.GetColType(tblNum, colNum)
-
 				switch colType {
 				case ColInt:
 					ival, err := callback.GetInt(tblNum, rowNum, colNum)
@@ -848,12 +846,9 @@ func TestMarshalling(t *testing.T) {
 						t.Error("Int extract failed in int column")
 					}
 					// fmt.Println("tblNum", tblNum, "rowNum", rowNum, "colNum", colNum, "ival", ival)
-
 					switch tblNum {
 					case 0:
-
 						switch rowNum {
-
 						case 0:
 							switch colNum {
 							case 0:
@@ -863,7 +858,6 @@ func TestMarshalling(t *testing.T) {
 							default:
 								t.Error("Column number is invalid on values on table 0 row 0")
 							}
-
 						case 1:
 							switch colNum {
 							case 0:
@@ -873,7 +867,6 @@ func TestMarshalling(t *testing.T) {
 							default:
 								t.Error("Column number is invalid on values on table 0 row 1 on ColInt")
 							}
-
 						case 2:
 							switch colNum {
 							case 0:
@@ -883,7 +876,6 @@ func TestMarshalling(t *testing.T) {
 							default:
 								t.Error("Column number is invalid on values on table 0 row 2 on colInt")
 							}
-
 						default:
 							t.Error("Row number is invalid on values on ColInt")
 						}
@@ -911,18 +903,15 @@ func TestMarshalling(t *testing.T) {
 					default:
 						t.Error("Table number is invalid on colInt")
 					}
-
 				case ColUint:
 					uval, err := callback.GetUint(tblNum, rowNum, colNum)
 					if err != nil {
 						t.Error("Unsigned int extract in column failed")
 					}
-
 					// fmt.Println("tblNum", tblNum, "rowNum", rowNum, "colNum", colNum, "uval", uval)
 					switch tblNum {
 					case 0:
 						switch rowNum {
-
 						case 0:
 							switch colNum {
 							case 1:
@@ -932,7 +921,6 @@ func TestMarshalling(t *testing.T) {
 							default:
 								t.Error("Column number is invalid on values on table 0 row 0 on ColUint")
 							}
-
 						case 1:
 							switch colNum {
 							case 1:
@@ -942,7 +930,6 @@ func TestMarshalling(t *testing.T) {
 							default:
 								t.Error("Column number is invalid on values on table 0 row 1 on ColUint")
 							}
-
 						case 2:
 							switch colNum {
 							case 1:
@@ -952,116 +939,138 @@ func TestMarshalling(t *testing.T) {
 							default:
 								t.Error("Column number is invalid on values on table 0 row 2 on ColUint")
 							}
-
 						default:
 							t.Error("Row number is invalid on values on table 0 on ColUint")
 						}
 					default:
 						t.Error("Table number is invalid on ColUint")
 					}
-
+				case ColBool:
+					bval, err := callback.GetBool(tblNum, rowNum, colNum)
+					if err != nil {
+						t.Error("bool extract in column failed")
+					}
+					// fmt.Println("tblNum", tblNum, "rowNum", rowNum, "colNum", colNum, "bval", bval)
+					switch tblNum {
+					case 0:
+						switch rowNum {
+						case 0:
+							switch colNum {
+							case 2:
+								if bval != false {
+									t.Error("bool value is not false")
+								}
+							default:
+								t.Error("Column number is invalid on values on table 0 row 0 on ColBool")
+							}
+						case 1:
+							switch colNum {
+							case 2:
+								if bval != true {
+									t.Error("bool value is not true")
+								}
+							default:
+								t.Error("Column number is invalid on values on table 0 row 1 on ColBool")
+							}
+						case 2:
+							switch colNum {
+							case 2:
+								if bval != true {
+									t.Error("bool value is not 787")
+								}
+							default:
+								t.Error("Column number is invalid on values on table 0 row 2 on ColBool")
+							}
+						default:
+							t.Error("Row number is invalid on values on table 0 on ColBool")
+						}
+					default:
+						t.Error("Table number is invalid on ColBool")
+					}
 				case ColFloat:
 					fval, err := callback.GetFloat(tblNum, rowNum, colNum)
 					if err != nil {
 						t.Error("extract of GetFloat failed on float column")
 					}
-
 					// fmt.Println("tblNum", tblNum, "rowNum", rowNum, "colNum", colNum, "fval", fval)
 					switch tblNum {
 					case 0:
-
 						switch rowNum {
-
 						case 0:
 							switch colNum {
-							case 2:
+							case 3:
 								if fval != 897087.9783408 {
 									t.Error("fval is not 897087.9783408")
 								}
 							default:
 								t.Error("Column number is invalid on values on table 0 row 0 on ColFloat")
 							}
-
 						case 1:
 							switch colNum {
-							case 2:
+							case 3:
 								if fval != 3.5 {
 									t.Error("float value is not 3.5")
 								}
 							default:
 								t.Error("Column number is invalid on values on table 0 row 1 on ColFloat")
 							}
-
 						case 2:
 							switch colNum {
-							case 2:
+							case 3:
 								if fval != 3.333111333 {
 									t.Error("float value is not 3.333111333")
 								}
 							default:
 								t.Error("Column number is invalid on values on table 0 row 2 on ColFloat")
 							}
-
 						default:
 							t.Error("Row number is invalid on values on table 0 on ColFloat")
 						}
 					default:
 						t.Error("Table number is invalid on values on ColFloat")
 					}
-
 				case ColString:
 					sval, err := callback.GetString(tblNum, rowNum, colNum)
 					if err != nil {
 						t.Error("Extract GetString for column failed")
 					}
-
 					// fmt.Println("tblNum", tblNum, "rowNum", rowNum, "colNum", colNum, "sval", sval)
-
 					switch tblNum {
 					case 0:
-
 						switch rowNum {
-
 						case 0:
 							switch colNum {
-							case 3:
+							case 4:
 								if sval != "This is a string." {
 									t.Error("sval is not this is a string")
 								}
-
 							default:
 								t.Error("Column number is invalid on values on table 0 row 0 on ColString")
 							}
-
 						case 1:
 							switch colNum {
-							case 3:
+							case 4:
 								if sval != "This is actually a string." {
 									t.Error("sval is not this is actually a string")
 								}
-
 							default:
 								t.Error("Column number is invalid on values on table 0 row 1 on ColString")
-
 							}
-
 						case 2:
 							switch colNum {
-							case 3:
+							case 4:
 								if sval != "This is really a string." {
 									t.Error("sval is not this is really a string")
 								}
 							default:
 								t.Error("Column number is invalid on values on table 0 row 2 on ColString")
 							}
-
 						default:
 							t.Error("Row number is invalid on values on table 0 on ColString")
 						}
 					case 1:
 						switch rowNum {
 						case 0:
-
 							switch colNum {
 							case 1:
 								if sval != "Tbl2String1130" {
@@ -1070,9 +1079,7 @@ func TestMarshalling(t *testing.T) {
 							default:
 								t.Error("Column number is invalid on values on table 1 row 0 on ColString")
 							}
-
 						case 1:
-
 							switch colNum {
 							case 1:
 								if sval != "Tbl2Str20190119" {
@@ -1092,44 +1099,37 @@ func TestMarshalling(t *testing.T) {
 					if err != nil {
 						t.Error("GetByteArray extraction in column failed")
 					}
-
 					// fmt.Println("tblNum", tblNum, "rowNum", rowNum, "colNum", colNum, "bval", bval)
 					switch tblNum {
 					case 0:
 						switch rowNum {
-
 						case 0:
 							switch colNum {
-							case 4:
+							case 5:
 								testCompareByteArrays(t, bval, []byte{84, 101, 115, 116, 66, 121, 116, 101, 115}, "byte array table 0 row 0 colum 4 is invalid")
 							default:
 								t.Error("Column number is invalid on values on table 0 row 0 on ColByteArray")
 							}
-
 						case 1:
 							switch colNum {
-							case 4:
+							case 5:
 								testCompareByteArrays(t, bval, []byte{84, 101, 115, 116, 66, 121, 116, 101, 115, 49, 54, 48, 50}, "byte array table 0 row 1 column 4 invalid")
 							default:
 								t.Error("Column number is invalid on values on table 0 row 1 on ColByteArray")
 							}
-
 						case 2:
 							switch colNum {
-							case 4:
+							case 5:
 								testCompareByteArrays(t, bval, []byte{66, 121, 116, 101, 115, 49, 54, 48, 57}, "byte array table 0 row 1 column 4 invalid")
 							default:
 								t.Error("Column number is invalid on values on table 0 row 2 on ColByteArray")
 							}
-
 						default:
 							t.Error("Row number is invalid on values on table 0 on ColByteArray")
-
 						}
 					default:
 						t.Error("Table number is invalid on values on ColByteArray")
 					}
-
 				default:
 					t.Error("Unrecognized column type returned")
 				}

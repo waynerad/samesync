@@ -34,10 +34,11 @@ type IWRPC interface {
 	StartRow()
 	AddRowColumnInt(param int64) error
 	AddRowColumnUint(param uint64) error
+	AddRowColumnBool(param bool) error
 	AddRowColumnFloat(param float64) error
 	AddRowColumnString(param string) error
 	AddRowColumnByteArray(param []byte) error
-	MarshallDB()
+	MarshallDB() error
 	SendDB(netConnection IWNetConnection) error
 	UnmarshallDB() error
 	ReceiveDB(message []byte)
@@ -51,6 +52,7 @@ type IWRPC interface {
 	GetNumRows(tblNum int) int
 	GetInt(tblNum int, rowNum int, colNum int) (int64, error)
 	GetUint(tblNum int, rowNum int, colNum int) (uint64, error)
+	GetBool(tblNum int, rowNum int, colNum int) (bool, error)
 	GetFloat(tblNum int, rowNum int, colNum int) (float64, error)
 	GetString(tblNum int, rowNum int, colNum int) (string, error)
 	GetByteArray(tblNum int, rowNum int, colNum int) ([]byte, error)
@@ -58,9 +60,10 @@ type IWRPC interface {
 
 const ColInt = 1
 const ColUint = 2
-const ColFloat = 3
-const ColString = 4
-const ColByteArray = 5
+const ColBool = 3
+const ColFloat = 4
+const ColString = 5
+const ColByteArray = 6
 
 const sentDB = 1
 const sentTable = 2
@@ -656,6 +659,8 @@ func NameOfColType(colType int) string {
 		return "int"
 	case ColUint:
 		return "unsigned int"
+	case ColBool:
+		return "bool"
 	case ColFloat:
 		return "float"
 	case ColString:
@@ -740,6 +745,27 @@ func (self *XWRPC) AddRowColumnUint(param uint64) error {
 	return nil
 }
 
+func (self *XWRPC) AddRowColumnBool(param bool) error {
+	tblNum := len(self.tables) - 1
+	rowNum := len(self.tables[tblNum].rows) - 1
+	lc := len(self.tables[tblNum].rows[rowNum])
+	if lc >= len(self.tables[tblNum].columns) {
+		return errors.New("Attempted to add column value, but there are no more columns.")
+	}
+	if self.tables[tblNum].columns[lc].colType != ColBool {
+		return errors.New("Incorrect type for column. Expected type " + NameOfColType(self.tables[tblNum].columns[lc].colType) + " for column " + `"` + self.tables[tblNum].columns[lc].name + `"` + " but actually got " + NameOfColType(ColBool))
+	}
+	// we add ints "naked" to save bytes
+	var uiParam uint64
+	if param {
+		uiParam = 1
+	} else {
+		uiParam = 0
+	}
+	self.tables[tblNum].rows[rowNum] = append(self.tables[tblNum].rows[rowNum], EncodeUint(uiParam))
+	return nil
+}
+
 func (self *XWRPC) AddRowColumnFloat(param float64) error {
 	tblNum := len(self.tables) - 1
 	rowNum := len(self.tables[tblNum].rows) - 1
@@ -782,7 +808,7 @@ func (self *XWRPC) AddRowColumnByteArray(param []byte) error {
 	return nil
 }
 
-func (self *XWRPC) MarshallDB() {
+func (self *XWRPC) MarshallDB() error {
 	self.message = make([]byte, 2, 1024)
 	self.message[0] = 'V'
 	self.message[1] = 0
@@ -808,15 +834,22 @@ func (self *XWRPC) MarshallDB() {
 		}
 
 		for rowNum := 0; rowNum < numRows; rowNum++ {
+			if len(self.tables[tblNum].rows[rowNum]) != numColumns {
+				return errors.New("Wrong number of columns in row " + intToStr(rowNum) + ". Cannot marshall.")
+			}
 			for colNum := 0; colNum < numColumns; colNum++ {
 				self.message = append(self.message, self.tables[tblNum].rows[rowNum][colNum]...)
 			}
 		}
 	}
+	return nil
 }
 
 func (self *XWRPC) SendDB(netConnection IWNetConnection) error {
-	self.MarshallDB()
+	err := self.MarshallDB()
+	if err != nil {
+		return err
+	}
 	return netConnection.SendMessage(self.message)
 }
 
@@ -865,12 +898,11 @@ func (self *XWRPC) UnmarshallDB() error {
 			for rowNum := 0; rowNum < numRows; rowNum++ {
 				self.StartRow()
 				for colNum := 0; colNum < numCols; colNum++ {
+					if position >= len(self.message) {
+						return errors.New("Off end of message. Message was malformed on the sending end.")
+					}
 					// int and uint are sent "naked" to save bytes
 					switch self.tables[tblNum].columns[colNum].colType {
-					case ColUint:
-						uIntNumBytes := int(self.message[position])
-						self.tables[tblNum].rows[rowNum] = append(self.tables[tblNum].rows[rowNum], self.message[position:position+uIntNumBytes+1])
-						position += uIntNumBytes + 1
 					case ColInt:
 						intNumBytes := int(self.message[position])
 						if (intNumBytes & 128) != 0 {
@@ -879,6 +911,14 @@ func (self *XWRPC) UnmarshallDB() error {
 						}
 						self.tables[tblNum].rows[rowNum] = append(self.tables[tblNum].rows[rowNum], self.message[position:position+intNumBytes+1])
 						position += intNumBytes + 1
+					case ColUint:
+						uIntNumBytes := int(self.message[position])
+						self.tables[tblNum].rows[rowNum] = append(self.tables[tblNum].rows[rowNum], self.message[position:position+uIntNumBytes+1])
+						position += uIntNumBytes + 1
+					case ColBool:
+						blNumBytes := int(self.message[position])
+						self.tables[tblNum].rows[rowNum] = append(self.tables[tblNum].rows[rowNum], self.message[position:position+blNumBytes+1])
+						position += blNumBytes + 1
 					default:
 						colBytes, position = getBlockByteArray(self.message, position)
 						self.tables[tblNum].rows[rowNum] = append(self.tables[tblNum].rows[rowNum], colBytes)
@@ -950,6 +990,21 @@ func (self *XWRPC) GetUint(tblNum int, rowNum int, colNum int) (uint64, error) {
 	}
 	theBytes := self.tables[tblNum].rows[rowNum][colNum]
 	return DecodeUint(theBytes), nil
+}
+
+func (self *XWRPC) GetBool(tblNum int, rowNum int, colNum int) (bool, error) {
+	if self.tables[tblNum].columns[colNum].colType != ColBool {
+		return false, errors.New("Incorrect type for column. Expected type " + NameOfColType(ColBool) + " but data was actually " + NameOfColType(self.tables[tblNum].columns[colNum].colType))
+	}
+	theBytes := self.tables[tblNum].rows[rowNum][colNum]
+	uiVal := DecodeUint(theBytes)
+	var bVal bool
+	if uiVal == 0 {
+		bVal = false
+	} else {
+		bVal = true
+	}
+	return bVal, nil
 }
 
 func (self *XWRPC) GetFloat(tblNum int, rowNum int, colNum int) (float64, error) {
