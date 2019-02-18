@@ -1,4 +1,4 @@
-# samesync
+# SameSync
 SameSync synchronizes files between machines and makes them the same.
 
 * All communication encrypted with AES256.
@@ -10,7 +10,7 @@ SameSync synchronizes files between machines and makes them the same.
 * Admin mode to set up system and diagnose and correct problems.
 * Written in Golang.
 * Works on all OSs where Go runs (Linux, Mac, Window) -- handles OS-specific issues like backslashes vs slashes in directory paths correctly.
-* Does not use HTTP for communication (communicates directly using TCP sockets using Go's net package)
+* Does not use HTTP for communication. Communicates directly using TCP sockets using Go's net package. Can run on any port you like.
 * Server does not use Go panics and handles errors gracefully without crashing.
 * Uses sqlite3 (via Go's SQL interface in the sql package) for all data (on both client and server sides). Does not require the installation of a database server.
 
