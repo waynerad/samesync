@@ -23,10 +23,11 @@ import (
 // "encoding/base64"
 
 type wfileInfo struct {
-	filePath string
-	fileSize int64
-	fileTime int64
-	fileHash string
+	filePath   string
+	fileSize   int64
+	fileTime   int64
+	fileHash   string
+	reupNeeded bool
 }
 
 type wfileSortSlice struct {
@@ -39,7 +40,7 @@ const roleSyncPointUser = 2
 const accessRead = 1
 const accessWrite = 2
 
-const databaseFileName = "samestate.db"
+const databaseFileName = ".samestate"
 const tempFileName = "temp.temp"
 
 func checkError(err error) {
@@ -68,11 +69,11 @@ func trim(stg string) string {
 	return strings.Trim(stg, " \t\n\r")
 }
 
-// func defaultKeys() ([]byte, []byte) {
-//	symmetricKey, _ := hex.DecodeString("a9672b783092f3f3049a5764d1c906f4d96e4914cf6b549d94280ee0f0814d56")
-//	hmacKey, _ := hex.DecodeString("84982f4a55885d7dfff30d72dcf74ad3b309683d4ac89935fddeca40efdc7ce4")
-//	return symmetricKey, hmacKey
-// }
+func getLocalTime() int64 {
+	now := time.Now()
+	result := now.UnixNano()
+	return result
+}
 
 func openConnection(symmetricKey []byte, hmacKey []byte, remoteHost string, portNumber int) (wrpc.IWNetConnection, error) {
 	wnet := wrpc.NewConnection()
@@ -102,12 +103,6 @@ func standardReply(wnet wrpc.IWNetConnection, fcname string) (wrpc.IWRPC, error)
 		return nil, errors.New(reply.GetDBName() + ": " + errmsg)
 	}
 	return reply, nil
-}
-
-func getLocalTime() int64 {
-	now := time.Now()
-	result := now.UnixNano()
-	return result
 }
 
 func standardStringReply(wnet wrpc.IWNetConnection, fcname string) (string, string, error) {
@@ -564,7 +559,11 @@ func rpcGetServerTreeForSyncPoint(wnet wrpc.IWNetConnection, syncpublicid string
 		if err != nil {
 			return nil, err
 		}
-		result = append(result, wfileInfo{filepath, 0, filetime, filehash})
+		reup, err := reply.GetBool(0, ii, 3)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, wfileInfo{filepath, 0, filetime, filehash, reup})
 	}
 	return result, nil
 }
@@ -575,6 +574,8 @@ func sendFile(wnet wrpc.IWNetConnection, syncpublicid string, localdir string, l
 		panic(err)
 	}
 	if info.IsDir() {
+		fmt.Println("localfilepath", localfilepath)
+		fmt.Println("info", info)
 		panic("File given to transfer is a directory")
 	}
 	//
@@ -646,7 +647,10 @@ func sendFile(wnet wrpc.IWNetConnection, syncpublicid string, localdir string, l
 	for keepGoing {
 		n, err := fh.Read(buffer)
 		if err == nil {
-			wnet.ShoveBytes(buffer[:n], ciphertext[:n])
+			err = wnet.ShoveBytes(buffer[:n], ciphertext[:n]) // UHU
+			if err != nil {
+				panic(nil)
+			}
 		} else {
 			if err == io.EOF {
 				keepGoing = false
@@ -719,6 +723,12 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 	if verbose {
 		fmt.Println("    Reply received:", reply.GetDBName())
 	}
+	if reply.GetDBName() == "FileDoesNotExist" {
+		if verbose {
+			fmt.Println("    File does not exist")
+		}
+		return "NoExist"
+	}
 	if reply.GetDBName() != "ReceiveFile" {
 		errmsg, err := reply.GetString(0, 0, 0)
 		if err != nil {
@@ -782,7 +792,7 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 	for bytesread < filesize {
 		lrest := filesize - bytesread
 		if lrest > bufferSize {
-			nIn, err = wnet.PullBytes(buffer, ciphertext)
+			nIn, err = wnet.PullBytes(buffer, ciphertext) // UHU
 		} else {
 			nIn, err = wnet.PullBytes(buffer[:lrest], ciphertext[:lrest])
 		}
@@ -873,6 +883,21 @@ func rpcMarkFileDeleted(wnet wrpc.IWNetConnection, syncpublicid string, filepath
 	}
 	errmsg, err := standardVoidReply(wnet, "MarkFileDeleted")
 	return errmsg, err
+}
+
+func rpcResetUserPassword(wnet wrpc.IWNetConnection, email string) (string, string, error) {
+	rpc := wrpc.NewDB()
+	rpc.StartDB("ResetUserPassword", 0, 1)
+	rpc.StartTable("", 1, 1)
+	rpc.AddColumn("", wrpc.ColString)
+	rpc.StartRow()
+	rpc.AddRowColumnString(email)
+	err := rpc.SendDB(wnet)
+	if err != nil {
+		return "", "", err
+	}
+	password, errmsg, err := standardStringReply(wnet, "ResetUserPassword")
+	return password, errmsg, err
 }
 
 // ----------------------------------------------------------------
@@ -1112,9 +1137,9 @@ func getLine(reader *bufio.Reader) string {
 }
 
 func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, verbose bool) {
-	reader := bufio.NewReader(os.Stdin)
+	keyboard := bufio.NewReader(os.Stdin)
 	fmt.Print("Admin password: ")
-	password := getLine(reader)
+	password := getLine(keyboard)
 	errmsg, err := rpcLogin(wnet, "admin", password)
 	if err != nil {
 		fmt.Println(err)
@@ -1126,7 +1151,7 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, verbose bool) {
 	}
 	for {
 		fmt.Print("> ")
-		command, err := reader.ReadString('\n')
+		command, err := keyboard.ReadString('\n')
 		if err != nil {
 			if err == io.EOF {
 				fmt.Println("")
@@ -1198,7 +1223,7 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, verbose bool) {
 					switch params[1] {
 					case "user":
 						fmt.Print("Email: ")
-						email := getLine(reader)
+						email := getLine(keyboard)
 						if verbose {
 							fmt.Println("The email you entered is:", email)
 						}
@@ -1215,7 +1240,7 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, verbose bool) {
 						} else {
 							fmt.Println("User created. Password is:")
 							fmt.Println(password)
-							yes := getYesNo(reader, "Set as email and password for this client? (y/n) ")
+							yes := getYesNo(keyboard, "Set as email and password for this client? (y/n) ")
 							if yes {
 								setNameValuePair(db, "email", email, verbose, false)
 								setNameValuePair(db, "password", password, verbose, false)
@@ -1225,7 +1250,7 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, verbose bool) {
 						path := ""
 						for path == "" {
 							fmt.Print("Path on server: ")
-							path = getLine(reader)
+							path = getLine(keyboard)
 						}
 						publicid, errmsg, err := rpcAddSyncPoint(wnet, path)
 						checkError(err)
@@ -1237,7 +1262,7 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, verbose bool) {
 						} else {
 							fmt.Println("The sync point ID is:")
 							fmt.Println(publicid)
-							yes := getYesNo(reader, "Set key as sync point for current directory tree? (y/n) ")
+							yes := getYesNo(keyboard, "Set key as sync point for current directory tree? (y/n) ")
 							if yes {
 								setNameValuePair(db, "syncpointid", publicid, verbose, false)
 							}
@@ -1246,19 +1271,19 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, verbose bool) {
 						email := ""
 						for email == "" {
 							fmt.Print("Email: ")
-							email = getLine(reader)
+							email = getLine(keyboard)
 						}
 						syncpublicid := ""
 						for syncpublicid == "" {
 							fmt.Print("Sync point ID: ")
-							syncpublicid = getLine(reader)
+							syncpublicid = getLine(keyboard)
 						}
 						access := 0
-						yes := getYesNo(reader, "Grant read access? (y/n) ")
+						yes := getYesNo(keyboard, "Grant read access? (y/n) ")
 						if yes {
 							access |= accessRead
 						}
-						yes = getYesNo(reader, "Grant write access? (y/n) ")
+						yes = getYesNo(keyboard, "Grant write access? (y/n) ")
 						if yes {
 							access |= accessWrite
 						}
@@ -1285,7 +1310,7 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, verbose bool) {
 					switch params[1] {
 					case "user":
 						fmt.Print("Email: ")
-						email := getLine(reader)
+						email := getLine(keyboard)
 						if verbose {
 							fmt.Println("The email you entered is:", email)
 						}
@@ -1304,9 +1329,9 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, verbose bool) {
 						syncpublicid := ""
 						for syncpublicid == "" {
 							fmt.Print("Sync point ID: ")
-							syncpublicid = getLine(reader)
+							syncpublicid = getLine(keyboard)
 						}
-						yes := getYesNo(reader, "Are you sure? Doing this will permanently prevent this server directory from ever being used as a syncpoint in the future. You will need to start with a new blank directory on the server if you want these files synced again. All access grants will be deleted and will need to be set up again if you ever want this sync point back. Are you really sure you want to do this? (y/n) ")
+						yes := getYesNo(keyboard, "Are you sure? Doing this will permanently prevent this server directory from ever being used as a syncpoint in the future. You will need to start with a new blank directory on the server if you want these files synced again. All access grants will be deleted and will need to be set up again if you ever want this sync point back. Are you really sure you want to do this? (y/n) ")
 						if yes {
 							errmsg, err := rpcDeleteSyncPoint(wnet, syncpublicid)
 							if err != nil {
@@ -1324,12 +1349,12 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, verbose bool) {
 						email := ""
 						for email == "" {
 							fmt.Print("Email: ")
-							email = getLine(reader)
+							email = getLine(keyboard)
 						}
 						syncpublicid := ""
 						for syncpublicid == "" {
 							fmt.Print("Sync point ID: ")
-							syncpublicid = getLine(reader)
+							syncpublicid = getLine(keyboard)
 						}
 						errmsg, err := rpcDeleteGrant(wnet, email, syncpublicid)
 						if err != nil {
@@ -1341,6 +1366,50 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, verbose bool) {
 						}
 					default:
 						fmt.Println("Delete: " + `"` + params[1] + `"` + " not found.")
+					}
+				}
+
+			case "reset":
+				if len(params) == 1 {
+					fmt.Println("Reset what?")
+					fmt.Println("    user password -- reset user password")
+				} else {
+					switch params[1] {
+					case "user":
+						if len(params) == 2 {
+							fmt.Println("Reset user what?")
+							fmt.Println("    password -- reset user password")
+						} else {
+							switch params[2] {
+							case "password":
+								fmt.Print("Email: ")
+								email := getLine(keyboard)
+								if verbose {
+									fmt.Println("The email you entered is:", email)
+								}
+								password, errmsg, err := rpcResetUserPassword(wnet, email)
+								if err != nil {
+									fmt.Println(err)
+									return
+								}
+								if errmsg != "" {
+									fmt.Println(errmsg)
+								}
+								fmt.Println("New password:")
+								fmt.Println(password)
+								localEmail := getValue(db, "email", "", verbose)
+								if email == localEmail {
+									yes := getYesNo(keyboard, "Set as password for this client? (y/n) ")
+									if yes {
+										setNameValuePair(db, "password", password, verbose, false)
+									}
+								}
+							default:
+								fmt.Println("Reset user: " + `"` + params[2] + `"` + " not found.")
+							}
+						}
+					default:
+						fmt.Println("Reset : " + `"` + params[1] + `"` + " not found.")
 					}
 				}
 			case "help":
@@ -1359,31 +1428,20 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, verbose bool) {
 				fmt.Println("    syncpoint -- delete sync point from server")
 				fmt.Println("    grant -- revoke a user's access to a sync point")
 
+				fmt.Println("reset")
+				fmt.Println("    user password -- reset user password")
+
 				fmt.Println("local")
 				fmt.Println("    show")
 				fmt.Println("        config -- show local machine current configuration")
 				fmt.Println("help -- this message")
 				fmt.Println("quit -- exit program")
 
-				// fmt.Println("== users ==")
-				// fmt.Println("listusers -- list users")
-				// fmt.Println("adduser -- add user")
-				// fmt.Println("== users ==")
-				// fmt.Println("listsyncpoints -- list sync points on the server")
-				// fmt.Println("addsyncpoint -- create a new sync point on the server")
-				// fmt.Println("== access ==")
-				// fmt.Println("listgrants -- list access grants")
-				// fmt.Println("grantusertosync -- grant access to a user to a sync point on the server")
-				// fmt.Println("== other ==")
-				// fmt.Println("showconfig -- show current client configuration")
-
 				// fmt.Println("--- the following not implemented yet")
 				// fmt.Println("deluser -- delete user")
 				// fmt.Println("chuserrole -- change user role")
-				// fmt.Println("resetuserpw -- reset user password")
 				// fmt.Println("joinsyncpoint -- add current directory to a sync point")
 				// fmt.Println("abandonsyncpoint -- remove current dirrectory tree from the sync point")
-				// fmt.Println("revokeusertosync -- revoke access from a user from a sync point on the server")
 
 			case "quit":
 				return
@@ -1459,7 +1517,7 @@ func getDirectoryTree(verbose bool, path string, result []wfileInfo, skipIfPermi
 				if verbose {
 					fmt.Println(completePath, "last modified", calcTimeFromNow(filestuff.ModTime().UnixNano()), "seconds ago")
 				}
-				result = append(result, wfileInfo{completePath, filestuff.Size(), filestuff.ModTime().UnixNano(), ""})
+				result = append(result, wfileInfo{completePath, filestuff.Size(), filestuff.ModTime().UnixNano(), "", false})
 			}
 		}
 	}
@@ -1613,7 +1671,7 @@ func retrieveTreeFromDB(verbose bool, db *sql.DB) []wfileInfo {
 	var filehash string
 	for rows.Next() {
 		rows.Scan(&fileid, &filepath, &filesize, &filetime, &filehash)
-		result = append(result, wfileInfo{filepath, filesize, filetime, filehash})
+		result = append(result, wfileInfo{filepath, filesize, filetime, filehash, false})
 	}
 
 	err = tx.Commit()
@@ -1653,7 +1711,7 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 				}
 				if localCompare == remoteCompare {
 					if verbose {
-						fmt.Println("Same file -- comparing file hashes.")
+						fmt.Println("File names are the same -- comparing file hashes.")
 					}
 					if localTree[localIdx].fileHash != remoteTree[remoteIdx].fileHash {
 						if verbose {
@@ -1686,22 +1744,32 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 								}
 							}
 						}
+					} else {
+						if verbose {
+							fmt.Println("Hashes match.")
+						}
+						if remoteTree[remoteIdx].reupNeeded {
+							toUploadLocal = localIdx
+							if verbose {
+								fmt.Println("Reupload needed -- marked to upload")
+							}
+						}
 					}
 					localIdx++
 					remoteIdx++
 				} else {
 					if verbose {
-						fmt.Println("Different files -- figure out which is first in alphabetical order.")
+						fmt.Println("File names are different -- figure out which is first in alphabetical order.")
 					}
 					if localCompare < remoteCompare {
 						if verbose {
-							fmt.Println("Files are different, local is first -- marked to upload")
+							fmt.Println("File names are different, local is first -- marked to upload")
 						}
 						toUploadLocal = localIdx
 						localIdx++
 					} else {
 						if verbose {
-							fmt.Println("Files are different, remote is first -- marked to download")
+							fmt.Println("File names are different, remote is first -- marked to download")
 						}
 						toDownloadRemote = remoteIdx
 						remoteIdx++
@@ -1727,8 +1795,12 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 				filehash := remoteTree[toDownloadRemote].fileHash
 				errmsg := retrieveFile(verbose, db, wnet, syncpublicid, localPath, localfilepath, filehash, serverTimeOffset)
 				if errmsg != "" {
-					fmt.Println(errmsg)
-					panic(errmsg)
+					if errmsg == "NoExist" {
+						fmt.Println("    File no longer exists on the server. File is flagged for re-upload. Run same on the machine with the last uploaded version to re-upload it.")
+					} else {
+						fmt.Println(errmsg)
+						panic(errmsg)
+					}
 				}
 			}
 		}
@@ -1848,32 +1920,44 @@ func main() {
 		return
 	}
 	if configure {
-		server := ""
-		for server == "" {
-			fmt.Print("Server: ")
-			fmt.Scanln(&server)
+		fmt.Println("Configuration:")
+		fmt.Println("Any entry you leave blank will not be updated.")
+		// server := ""
+		fmt.Print("Server: ")
+		keyboard := bufio.NewReader(os.Stdin)
+		server := getLine(keyboard)
+		// fmt.Scanln(&server)
+		if server != "" {
+			setNameValuePair(db, "server", server, verbose, false)
 		}
-		setNameValuePair(db, "server", server, verbose, false)
 		port := 0
-		for port == 0 {
-			var ptStr string
-			fmt.Print("Port: ")
-			fmt.Scanln(&ptStr)
+		fmt.Print("Port: ")
+		ptStr := getLine(keyboard)
+		// fmt.Scanln(&ptStr)
+		if ptStr != "" {
 			port = strToInt(ptStr)
+			if port != 0 {
+				setNameValuePair(db, "port", intToStr(port), verbose, false)
+			}
 		}
-		setNameValuePair(db, "port", intToStr(port), verbose, false)
-		email := ""
 		fmt.Print("Email: ")
-		fmt.Scanln(&email)
-		setNameValuePair(db, "email", email, verbose, false)
-		password := ""
+		email := getLine(keyboard)
+		// fmt.Scanln(&email)
+		if email != "" {
+			setNameValuePair(db, "email", email, verbose, false)
+		}
 		fmt.Print("Password: ")
-		fmt.Scanln(&password)
-		setNameValuePair(db, "password", password, verbose, false)
-		syncPointID := ""
+		password := getLine(keyboard)
+		// fmt.Scanln(&password)
+		if password != "" {
+			setNameValuePair(db, "password", password, verbose, false)
+		}
 		fmt.Print("Sync point ID: ")
-		fmt.Scanln(&syncPointID)
-		setNameValuePair(db, "syncpointid", syncPointID, verbose, false)
+		syncPointID := getLine(keyboard)
+		// fmt.Scanln(&syncPointID)
+		if syncPointID != "" {
+			setNameValuePair(db, "syncpointid", syncPointID, verbose, false)
+		}
 		return
 	}
 	if showConfig {
