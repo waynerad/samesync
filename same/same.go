@@ -832,7 +832,18 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 		}
 	}
 	//
-	// Step 6: Stash all the info about the file in our local database
+	// Step 6: Set the file time. Not doing this will allow our local system
+	// to be fooled and think the time we are writing the file right now was
+	// the last time the file was edited, possibly giving it a newer time
+	// stamp than an actual newer version of the file that exists on some
+	// other machine!
+	mtime := time.Unix(0, modtime)
+	err = os.Chtimes(finalDestinationPath, mtime, mtime) // using same time as both atime and modtime
+	if err != nil {
+		return err.Error()
+	}
+	//
+	// Step 7: Stash all the info about the file in our local database
 	if verbose {
 		fmt.Println("    Storing updated file time and hash.")
 	}
@@ -863,8 +874,13 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 	return errmsg
 }
 
-func rpcMarkFileDeleted(wnet wrpc.IWNetConnection, syncpublicid string, filepath string, filehash string) (string, error) {
+func rpcMarkFileDeleted(verbose bool, wnet wrpc.IWNetConnection, syncpublicid string, filepath string, filehash string, serverTimeOffset int64) (string, error) {
 	modtime := time.Now().UnixNano()
+	if verbose {
+		fmt.Println("Marking remote file for deletion:", filepath, "with modtime", modtime)
+		fmt.Println("    serverTimeOffset", serverTimeOffset)
+		fmt.Println("    time sent", modtime+serverTimeOffset)
+	}
 	rpc := wrpc.NewDB()
 	rpc.StartDB("MarkFileDeleted", 0, 1)
 	rpc.StartTable("", 4, 1)
@@ -875,7 +891,7 @@ func rpcMarkFileDeleted(wnet wrpc.IWNetConnection, syncpublicid string, filepath
 	rpc.StartRow()
 	rpc.AddRowColumnString(syncpublicid)
 	rpc.AddRowColumnString(filepath)
-	rpc.AddRowColumnInt(modtime)
+	rpc.AddRowColumnInt(modtime + serverTimeOffset)
 	rpc.AddRowColumnString(filehash)
 	err := rpc.SendDB(wnet)
 	if err != nil {
@@ -1262,7 +1278,7 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, verbose bool) {
 						} else {
 							fmt.Println("The sync point ID is:")
 							fmt.Println(publicid)
-							yes := getYesNo(keyboard, "Set key as sync point for current directory tree? (y/n) ")
+							yes := getYesNo(keyboard, "Set key as sync point for this client? (y/n) ")
 							if yes {
 								setNameValuePair(db, "syncpointid", publicid, verbose, false)
 							}
@@ -1515,7 +1531,7 @@ func getDirectoryTree(verbose bool, path string, result []wfileInfo, skipIfPermi
 				checkError(err)
 			} else {
 				if verbose {
-					fmt.Println(completePath, "last modified", calcTimeFromNow(filestuff.ModTime().UnixNano()), "seconds ago")
+					fmt.Println(completePath, "size", filestuff.Size(), "bytes, last modified", calcTimeFromNow(filestuff.ModTime().UnixNano()), "seconds ago")
 				}
 				result = append(result, wfileInfo{completePath, filestuff.Size(), filestuff.ModTime().UnixNano(), "", false})
 			}
@@ -1618,7 +1634,7 @@ func putTreeInTableAndFillInHashesThatNeedToBeUpdated(verbose bool, db *sql.DB, 
 				_, err := stmtIns.Exec(makePathSeparatorsStandard(tree[ii].filePath[chopOff:]), tree[ii].fileSize, tree[ii].fileTime, fileHash)
 				checkError(err)
 			} else {
-				if (filesize == tree[ii].fileSize) && (filetime == tree[ii].fileTime) {
+				if (filesize == tree[ii].fileSize) && (filetime == tree[ii].fileTime) && (oldFileHash != "deleted") {
 					// assume hasn't changed -- leave alone!
 					if verbose {
 						fmt.Println(" - Has not changed")
@@ -1638,11 +1654,10 @@ func putTreeInTableAndFillInHashesThatNeedToBeUpdated(verbose bool, db *sql.DB, 
 		}
 	}
 	for fileid, _ = range deleteMap {
-		if verbose {
-			fmt.Println("marking file ID", fileid, "as deleted.")
-		}
 		currentTime := time.Now().UnixNano()
-		fmt.Println("fileid", fileid, "currentTime", currentTime)
+		if verbose {
+			fmt.Println("marking file ID", fileid, "as deleted with current time", currentTime)
+		}
 		_, err := stmtUpMarkDel.Exec(currentTime, fileid)
 		checkError(err)
 	}
@@ -1702,7 +1717,16 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 				if verbose {
 					fmt.Println("Off end of remote tree")
 				}
-				toUploadLocal = localIdx
+				if localTree[localIdx].fileHash == "deleted" {
+					if verbose {
+						fmt.Println("Local file is deleted, no remote file to delete so we do nothing.")
+					}
+				} else {
+					toUploadLocal = localIdx
+					if verbose {
+						fmt.Println("Local file is marked to upload")
+					}
+				}
 				localIdx++
 			} else {
 				remoteCompare := remoteTree[remoteIdx].filePath
@@ -1721,9 +1745,15 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 						}
 						if localTree[localIdx].fileTime > remoteTree[remoteIdx].fileTime {
 							if localTree[localIdx].fileHash == "deleted" {
-								toDeleteRemote = remoteIdx
-								if verbose {
-									fmt.Println("Local file is newer and deleted-- marked remote file to be deleted")
+								if remoteTree[remoteIdx].fileHash == "deleted" {
+									if verbose {
+										fmt.Println("Local file is newer but local file is deleted but remote file is also deleted, so doing nothing.")
+									}
+								} else {
+									toDeleteRemote = remoteIdx
+									if verbose {
+										fmt.Println("Local file is newer but local file is deleted -- marked remote file to be deleted")
+									}
 								}
 							} else {
 								toUploadLocal = localIdx
@@ -1733,9 +1763,16 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 							}
 						} else {
 							if remoteTree[remoteIdx].fileHash == "deleted" {
-								toDeleteLocal = localIdx
-								if verbose {
-									fmt.Println("Remote file is newer and deleted -- marked local file to be deleted")
+								if localTree[localIdx].fileHash == "deleted" {
+									if verbose {
+										fmt.Println("Local file is newer but local file is deleted but remote file is also deleted, so doing nothing.")
+										fmt.Println("Remote file is newer and deleted but local file is also deleted, so doing nothing.")
+									}
+								} else {
+									toDeleteLocal = localIdx
+									if verbose {
+										fmt.Println("Remote file is newer and deleted -- marked local file to be deleted")
+									}
 								}
 							} else {
 								toDownloadRemote = remoteIdx
@@ -1763,15 +1800,34 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 					}
 					if localCompare < remoteCompare {
 						if verbose {
-							fmt.Println("File names are different, local is first -- marked to upload")
+							fmt.Println("File names are different, local is first")
 						}
-						toUploadLocal = localIdx
+
+						if localTree[localIdx].fileHash == "deleted" {
+							if verbose {
+								fmt.Println("Local file is newer and deleted -- no remote file to delete, so doing nothing.")
+							}
+						} else {
+							toUploadLocal = localIdx
+							if verbose {
+								fmt.Println("Local file is not deleted -- marked to upload")
+							}
+						}
 						localIdx++
 					} else {
 						if verbose {
-							fmt.Println("File names are different, remote is first -- marked to download")
+							fmt.Println("File names are different, remote is first")
 						}
-						toDownloadRemote = remoteIdx
+						if remoteTree[remoteIdx].fileHash == "deleted" {
+							if verbose {
+								fmt.Println("Remote file is newer and deleted -- no corresponding local file, so doing nothing.")
+							}
+						} else {
+							if verbose {
+								fmt.Println("Remote file is not deleted -- marked to download")
+							}
+							toDownloadRemote = remoteIdx
+						}
 						remoteIdx++
 					}
 				}
@@ -1779,7 +1835,7 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 		}
 		if toUploadLocal >= 0 {
 			if (localTree[toUploadLocal].filePath != filterDatabaseFile) && (localTree[toUploadLocal].filePath != filterTempFile) { // filter out ourselves
-				fmt.Println("Pushing:", localTree[toUploadLocal].filePath)
+				fmt.Println("Pushing -->", localTree[toUploadLocal].filePath[1:])
 				localfilepath := localPath + localTree[toUploadLocal].filePath
 				filehash := localTree[toUploadLocal].fileHash
 				errmsg := sendFile(wnet, syncpublicid, localPath, localfilepath, filehash, serverTimeOffset)
@@ -1790,7 +1846,7 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 		}
 		if toDownloadRemote >= 0 {
 			if (remoteTree[toDownloadRemote].filePath != filterDatabaseFile) && (remoteTree[toDownloadRemote].filePath != filterTempFile) { // filter out ourselves
-				fmt.Println("Pulling:", remoteTree[toDownloadRemote].filePath)
+				fmt.Println("Pulling <--", remoteTree[toDownloadRemote].filePath[1:])
 				localfilepath := localPath + remoteTree[toDownloadRemote].filePath
 				filehash := remoteTree[toDownloadRemote].fileHash
 				errmsg := retrieveFile(verbose, db, wnet, syncpublicid, localPath, localfilepath, filehash, serverTimeOffset)
@@ -1806,10 +1862,10 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 		}
 		if toDeleteRemote >= 0 {
 			if (remoteTree[toDeleteRemote].filePath != filterDatabaseFile) && (remoteTree[toDeleteRemote].filePath != filterTempFile) { // filter out ourselves
-				fmt.Println("Pushing delete notification: ", remoteTree[toDeleteRemote].filePath)
+				fmt.Println("Pushing delete notification: ", remoteTree[toDeleteRemote].filePath[1:])
 				remotefilepath := remoteTree[toDeleteRemote].filePath
 				filehash := remoteTree[toDeleteRemote].fileHash
-				errmsg, err := rpcMarkFileDeleted(wnet, syncpublicid, remotefilepath, filehash)
+				errmsg, err := rpcMarkFileDeleted(verbose, wnet, syncpublicid, remotefilepath, filehash, serverTimeOffset)
 				if err != nil {
 					fmt.Println(err.Error())
 					panic(err)
@@ -1822,9 +1878,11 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 		}
 		if toDeleteLocal >= 0 {
 			if (localTree[toDeleteLocal].filePath != filterDatabaseFile) && (localTree[toDeleteLocal].filePath != filterTempFile) { // filter out ourselves
-				fmt.Println("Deleting: ", localTree[toDeleteLocal].filePath)
+				fmt.Println("Deleting: ", localTree[toDeleteLocal].filePath[1:])
 				localfilepath := localPath + makePathSeparatorsForThisOS(localTree[toDeleteLocal].filePath)
-				fmt.Println("localfilepath", localfilepath)
+				if verbose {
+					fmt.Println("Deleting local file path:", localfilepath)
+				}
 				os.Remove(localfilepath)
 			}
 		}
@@ -1864,6 +1922,7 @@ func main() {
 	importEndToEndKeys := *eflag
 	showEndToEndKeys := *xflag
 	if verbose {
+		fmt.Println("same version 0.3.4")
 		fmt.Println("Command line flags:")
 		fmt.Println("    Initialize mode:", onOff(initialize))
 		fmt.Println("    Configure mode:", onOff(configure))
@@ -1878,6 +1937,19 @@ func main() {
 	if initialize {
 		if verbose {
 			fmt.Println("Creating state file in current directory.")
+		}
+		rootPath, db, err = getStateDB(currentPath, useFile, databaseFileName, verbose)
+		if rootPath != "" {
+			fmt.Println("You cannot create a syncronized directory inside another synchronized directory.")
+			return
+		}
+		localTree := make([]wfileInfo, 0)
+		localTree, err = getDirectoryTree(verbose, currentPath, localTree, false)
+		for ii := 0; ii < len(localTree); ii++ {
+			if localTree[ii].filePath[len(localTree[ii].filePath)-len(databaseFileName):] == databaseFileName {
+				fmt.Println("You cannot create a syncronized directory with another synchronized directory inside it.")
+				return
+			}
 		}
 		db, err = sql.Open("sqlite3", currentPath+string(os.PathSeparator)+databaseFileName)
 		checkError(err)
@@ -1920,7 +1992,6 @@ func main() {
 		return
 	}
 	if configure {
-		fmt.Println("Configuration:")
 		fmt.Println("Any entry you leave blank will not be updated.")
 		// server := ""
 		fmt.Print("Server: ")
@@ -2102,7 +2173,7 @@ func main() {
 	// Ok, now that we're logged in, let's scan the local disk and ask the remote server to tell us what it has
 	var sortSlice wfileSortSlice
 	localTree := make([]wfileInfo, 0)
-	path := currentPath
+	path := rootPath
 	if verbose {
 		fmt.Println("Scanning local tree.")
 	}
@@ -2124,6 +2195,8 @@ func main() {
 	// otherwise when a user deletes a file, it will just magically
 	// reappear every time
 	localTree = retrieveTreeFromDB(verbose, db)
+	// sortSlice.theSlice = localTree
+	// sort.Sort(&sortSlice)
 	remoteTree, err := rpcGetServerTreeForSyncPoint(wnet, syncPointID)
 	if err != nil {
 		fmt.Println(err)

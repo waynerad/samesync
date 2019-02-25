@@ -687,7 +687,9 @@ func getTime() int64 {
 
 func receiveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *authinfo, syncpublicid string, filepath string, size int64, modtime int64, filehash string) (string, error) {
 	version := 0
-	fmt.Println("Receiving file:", filepath)
+	if verbose {
+		fmt.Println("Receiving file:", filepath)
+	}
 	//
 	// Step 1: Check permissions
 	if (auth.role & roleSyncPointUser) == 0 {
@@ -1691,7 +1693,7 @@ func markFileDeleted(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *
 	if err != nil {
 		return err
 	}
-	fileid, modtime, ourFileHash, err := getFileInfo(db, syncptid, filepath)
+	fileid, _, ourFileHash, err := getFileInfo(db, syncptid, filepath)
 	if err != nil {
 		return err
 	}
@@ -2233,6 +2235,21 @@ func getLine(reader *bufio.Reader) (string, error) {
 	return trim(result), err
 }
 
+func fileExists(filepath string) (bool, error) {
+	fhFile, err := os.Open(makePathSeparatorsForThisOS(filepath))
+	if err != nil {
+		message := err.Error()
+		if message[len(message)-25:] == "no such file or directory" {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+	}
+	err = fhFile.Close()
+	return true, err
+}
+
 func main() {
 	vflag := flag.Bool("v", false, "verbose mode")
 	gflag := flag.Bool("g", false, "generate key")
@@ -2248,7 +2265,7 @@ func main() {
 	showKeys := *kflag
 	createAdmin := *aflag
 	if verbose {
-		fmt.Println("samed version 0.0")
+		fmt.Println("samed version 0.3.4")
 		fmt.Println("Flags:")
 		fmt.Println("    Generate key mode:", onOff(generateKeys))
 		fmt.Println("    Initialize:", onOff(initialize))
@@ -2272,6 +2289,15 @@ func main() {
 			return
 		}
 		fmt.Println("Initialized.")
+		return
+	}
+	exist, err := fileExists(databaseFileName)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	if !exist {
+		fmt.Println("No " + databaseFileName + " file found. Either you are in the wrong directory, or you have not initialized the system. Use samed -i to initialize.")
 		return
 	}
 	db, err := sql.Open("sqlite3", databaseFileName)
