@@ -1043,7 +1043,7 @@ func NewConnection() IWNetConnection {
 	return &result
 }
 
-// Helper functions to speed things up
+// Helper functions to speed things up -- Server Side
 
 func SendReplyScalarInt(funcname string, version int, result int64, errmsg string, wnet IWNetConnection) error {
 	var reply XWRPC
@@ -1077,6 +1077,58 @@ func SendReplyVoid(funcname string, version int, errmsg string, wnet IWNetConnec
 	reply.StartRow()
 	reply.AddRowColumnString(errmsg)
 	return reply.SendDB(wnet)
+}
+
+// Helper functions to speed things up -- Client Side
+
+func StandardReply(wnet IWNetConnection, fcname string) (IWRPC, error) {
+	replmsg, err := wnet.NextMessage()
+	if err != nil {
+		return nil, err
+	}
+	if len(replmsg) == 0 {
+		// if message is empty, we assume the server closed the connection.
+		wnet.Close()
+		return nil, errors.New("Connection closed by same server.")
+	}
+	reply := NewDB()
+	reply.ReceiveDB(replmsg)
+	if reply.GetDBName() != fcname+"Reply" {
+		errmsg, err := reply.GetString(0, 0, 0)
+		if err != nil {
+			return nil, errors.New(reply.GetDBName())
+		}
+		return nil, errors.New(reply.GetDBName() + ": " + errmsg)
+	}
+	return reply, nil
+}
+
+func StandardStringReply(wnet IWNetConnection, fcname string) (string, string, error) {
+	reply, err := StandardReply(wnet, fcname)
+	if err != nil {
+		return "", "", err
+	}
+	result, err := reply.GetString(0, 0, 0)
+	if err != nil {
+		return "", "", err
+	}
+	errmsg, err := reply.GetString(0, 0, 1)
+	if err != nil {
+		return result, "", err
+	}
+	return result, errmsg, nil
+}
+
+func StandardVoidReply(wnet IWNetConnection, fcname string) (string, error) {
+	reply, err := StandardReply(wnet, fcname)
+	if err != nil {
+		return "", err
+	}
+	errmsg, err := reply.GetString(0, 0, 0)
+	if err != nil {
+		return "", err
+	}
+	return errmsg, nil
 }
 
 // Helper functions for debugging

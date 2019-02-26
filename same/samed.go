@@ -15,49 +15,14 @@ import (
 	"io"
 	"net"
 	"os"
+	"samecommon"
 	"strconv"
 	"strings"
 	"time"
 	"wrpc"
 )
 
-const roleAdmin = 1
-const roleSyncPointUser = 2
-
-const accessRead = 1
-const accessWrite = 2
-
 const databaseFileName = "sameserver.db"
-
-type authinfo struct {
-	userid int64
-	role   int
-}
-
-type listUserInfo struct {
-	email string
-	role  int
-}
-
-type listSyncPointInfo struct {
-	publicid string
-	path     string
-}
-
-type listGrantInfo struct {
-	email    string
-	publicid string
-	access   int
-}
-
-// we don't use fileSize but we're including it here to make this definition identical with the client
-type wfileInfo struct {
-	filePath   string
-	fileSize   int64
-	fileTime   int64
-	fileHash   string
-	reupNeeded bool
-}
 
 func intToStr(ii int) string {
 	return strconv.FormatInt(int64(ii), 10)
@@ -82,18 +47,6 @@ func onOff(bv bool) string {
 // Most of these "generate" functions all do the same thing --
 // generate 32 bytes. But they're all separate functions, because
 // conceptually they generate different things.
-
-func generateAESKey() ([]byte, error) {
-	key := make([]byte, 32)
-	_, err := rand.Read(key)
-	return key, err
-}
-
-func generateSHAKey() ([]byte, error) {
-	key := make([]byte, 32)
-	_, err := rand.Read(key)
-	return key, err
-}
 
 func generatePassword() (string, error) {
 	key := make([]byte, 32)
@@ -127,116 +80,6 @@ func generateSyncPointId() ([]byte, error) {
 	key := make([]byte, 32)
 	_, err := rand.Read(key)
 	return key, err
-}
-
-func roleFlagsToString(roleflags int) string {
-	result := ""
-	if roleflags == 0 {
-		return result
-	}
-	if (roleflags & roleAdmin) != 0 {
-		result += ", Admin"
-	}
-	if (roleflags & roleSyncPointUser) != 0 {
-		result += ", Sync point user"
-	}
-	return result[2:]
-}
-
-func accessFlagsToString(access int) string {
-	result := ""
-	if access == 0 {
-		return result
-	}
-	if access == accessRead {
-		return "Read Only"
-	}
-	if access == accessWrite {
-		return "Write Only"
-	}
-	if (access & accessRead) != 0 {
-		result += ", Read"
-	}
-	if (access & accessWrite) != 0 {
-		result += ", Write"
-	}
-	return result[2:]
-}
-
-func setNameValuePair(db *sql.DB, name string, value string, verbose bool, protectExistingValue bool) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	cmd := "SELECT nvpairid FROM settings WHERE name = ?;"
-	stmtSelExisting, err := tx.Prepare(cmd)
-	if err != nil {
-		return err
-	}
-	rowsExisting, err := stmtSelExisting.Query(name)
-	if err != nil {
-		return err
-	}
-	defer rowsExisting.Close()
-	var nvpairid int64
-	nvpairid = 0
-	for rowsExisting.Next() {
-		err = rowsExisting.Scan(&nvpairid)
-		if err != nil {
-			return err
-		}
-	}
-	if nvpairid == 0 {
-		cmd = "INSERT INTO settings (name, value) VALUES (?, ?);"
-		stmtIns, err := tx.Prepare(cmd)
-		if err != nil {
-			return err
-		}
-		_, err = stmtIns.Exec(name, value)
-		if err != nil {
-			return err
-		}
-	} else {
-		if protectExistingValue {
-			err := tx.Rollback()
-			return err
-		}
-		cmd = "UPDATE settings SET value = ? WHERE nvpairid = ?;"
-		stmtUpd, err := tx.Prepare(cmd)
-		_, err = stmtUpd.Exec(value, nvpairid)
-		if err != nil {
-			return err
-		}
-	}
-	err = tx.Commit()
-	if verbose {
-		fmt.Println("Set configuration setting:", name, "=", value)
-	}
-	return err
-}
-
-func getValue(db *sql.DB, name string, defval string, verbose bool) (string, error) {
-	var value string
-	value = defval
-	cmd := "SELECT value FROM settings WHERE name = ?;"
-	stmtSel, err := db.Prepare(cmd)
-	if err != nil {
-		return "", err
-	}
-	rows, err := stmtSel.Query(name)
-	if err != nil {
-		return "", err
-	}
-	for rows.Next() {
-		err = rows.Scan(&value)
-		if err != nil {
-			return "", err
-		}
-	}
-	if verbose {
-		fmt.Println(name, "=", value)
-	}
-	return value, nil
 }
 
 func initializeSettings(db *sql.DB) error {
@@ -414,7 +257,7 @@ func createTheAdminAccount(db *sql.DB, verbose bool) error {
 	pwsalt := hex.EncodeToString(pwSaltBin)
 	pwHashBin := calculatePwHash(pwSaltBin, password)
 	pwhash := hex.EncodeToString(pwHashBin)
-	role := roleAdmin
+	role := samecommon.RoleAdmin
 	if userid == 0 {
 		cmd = "INSERT INTO user (email, pwsalt, pwhash, role) VALUES (?, ?, ?, ?);"
 		stmtIns, err := tx.Prepare(cmd)
@@ -447,7 +290,7 @@ func createTheAdminAccount(db *sql.DB, verbose bool) error {
 		fmt.Println("        password: ", password)
 		fmt.Println("        password salt: ", pwsalt)
 		fmt.Println("        password hash: ", pwhash)
-		fmt.Println("        role: ", roleFlagsToString(role))
+		fmt.Println("        role: ", samecommon.RoleFlagsToString(role))
 	}
 	fmt.Println(password)
 	return err
@@ -472,14 +315,14 @@ func isDirEmpty(path string, verbose bool) (bool, error) {
 	return false, nil
 }
 
-func determineAccessForSyncPoint(verbose bool, db *sql.DB, auth *authinfo, syncpublicid string, accessRequested int) (int64, string, error) {
+func determineAccessForSyncPoint(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, syncpublicid string, accessRequested int) (int64, string, error) {
 	if verbose {
-		fmt.Println("Checking access for: userid", auth.userid, "sync point public ID", syncpublicid, "with requested access flags", accessFlagsToString(accessRequested))
+		fmt.Println("Checking access for: userid", auth.UserId, "sync point public ID", syncpublicid, "with requested access flags", samecommon.AccessFlagsToString(accessRequested))
 	}
-	if auth.userid == 0 {
+	if auth.UserId == 0 {
 		return 0, "", errors.New("Access denied: not logged in.")
 	}
-	if (auth.role & roleSyncPointUser) == 0 {
+	if (auth.Role & samecommon.RoleSyncPointUser) == 0 {
 		return 0, "", errors.New("Access denied: User does not have " + `"` + "SyncPointUser" + `"` + " role.")
 	}
 	cmd := "SELECT syncptid, path FROM syncpoint WHERE publicid = ?;"
@@ -512,7 +355,7 @@ func determineAccessForSyncPoint(verbose bool, db *sql.DB, auth *authinfo, syncp
 	if err != nil {
 		return 0, "", errors.New("determineAccessForSyncPoint: " + err.Error())
 	}
-	rowsGrant, err := stmtSelGrant.Query(syncptid, auth.userid)
+	rowsGrant, err := stmtSelGrant.Query(syncptid, auth.UserId)
 	if err != nil {
 		return 0, "", errors.New("determineAccessForSyncPoint: " + err.Error())
 	}
@@ -532,54 +375,11 @@ func determineAccessForSyncPoint(verbose bool, db *sql.DB, auth *authinfo, syncp
 	if (access & accessRequested) == accessRequested {
 		return syncptid, path, nil
 	}
-	return syncptid, path, errors.New("Access denied. No access grant for requested access:" + accessFlagsToString(accessRequested))
-}
-
-// This function converts all path separators to whatever our actual OS uses
-func makePathSeparatorsForThisOS(filepath string) string {
-	asbytes := []byte(filepath)
-	lasb := len(asbytes)
-	for ii := 0; ii < lasb; ii++ {
-		if (asbytes[ii] == '/') || (asbytes[ii] == '\\') {
-			asbytes[ii] = os.PathSeparator
-		}
-	}
-	return string(asbytes)
-}
-
-// This function converts all path separators to a stardard form
-// (forward slash) for us to store in the database.
-// Having a standard form means it will match requests correctly
-// no matter what OS the client is using.
-func makePathSeparatorsStandard(filepath string) string {
-	asbytes := []byte(filepath)
-	lasb := len(asbytes)
-	for ii := 0; ii < lasb; ii++ {
-		if asbytes[ii] == '\\' {
-			asbytes[ii] = '/'
-		}
-	}
-	return string(asbytes)
-}
-
-// This function converts all path separators to whatever our actual OS uses
-// Path must use current OS path separators or this won't work.
-func makePathForFile(filepath string) error {
-	last := -1
-	lfp := len(filepath)
-	for ii := 0; ii < lfp; ii++ {
-		if filepath[ii] == os.PathSeparator {
-			last = ii
-		}
-	}
-	if last <= 0 {
-		return nil
-	}
-	return os.MkdirAll(filepath[:last], 0777)
+	return syncptid, path, errors.New("Access denied. No access grant for requested access:" + samecommon.AccessFlagsToString(accessRequested))
 }
 
 func stashFileInfo(db *sql.DB, syncptid int64, filepath string, modtime int64, filehash string) error {
-	filepath = makePathSeparatorsStandard(filepath)
+	filepath = samecommon.MakePathSeparatorsStandard(filepath)
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -625,7 +425,7 @@ func stashFileInfo(db *sql.DB, syncptid int64, filepath string, modtime int64, f
 }
 
 func getFileInfo(db *sql.DB, syncptid int64, filepath string) (int64, int64, string, error) {
-	filepath = makePathSeparatorsStandard(filepath)
+	filepath = samecommon.MakePathSeparatorsStandard(filepath)
 	cmd := "SELECT fileid, modtime, filehash FROM fileinfo WHERE (syncptid = ?) AND (filepath = ?);"
 	stmtSel, err := db.Prepare(cmd)
 	if err != nil {
@@ -685,18 +485,18 @@ func getTime() int64 {
 	return result
 }
 
-func receiveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *authinfo, syncpublicid string, filepath string, size int64, modtime int64, filehash string) (string, error) {
+func receiveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *samecommon.AuthInfo, syncpublicid string, filepath string, size int64, modtime int64, filehash string) (string, error) {
 	version := 0
 	if verbose {
 		fmt.Println("Receiving file:", filepath)
 	}
 	//
 	// Step 1: Check permissions
-	if (auth.role & roleSyncPointUser) == 0 {
+	if (auth.Role & samecommon.RoleSyncPointUser) == 0 {
 		wnet.Close()
 		return "", errors.New("Permission denied: User is not assigned to the sync point user role.")
 	}
-	syncptid, localpath, err := determineAccessForSyncPoint(verbose, db, auth, syncpublicid, accessWrite)
+	syncptid, localpath, err := determineAccessForSyncPoint(verbose, db, auth, syncpublicid, samecommon.AccessWrite)
 	if err != nil {
 		return "", err
 	}
@@ -748,13 +548,13 @@ func receiveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *auth
 	// Step 4: Rename the file to slot it in place, replacing the
 	// existing file, which we have preserved until now in case
 	// anything went wrong.
-	err = os.Rename(localpath+string(os.PathSeparator)+"temp.temp", localpath+makePathSeparatorsForThisOS(filepath))
+	err = os.Rename(localpath+string(os.PathSeparator)+"temp.temp", localpath+samecommon.MakePathSeparatorsForThisOS(filepath))
 	if err != nil {
-		mkerr := makePathForFile(localpath + makePathSeparatorsForThisOS(filepath))
+		mkerr := samecommon.MakePathForFile(localpath + samecommon.MakePathSeparatorsForThisOS(filepath))
 		if mkerr != nil {
 			return "", errors.New("receiveFile: make path: " + err.Error())
 		}
-		mverr := os.Rename(localpath+string(os.PathSeparator)+"temp.temp", localpath+makePathSeparatorsForThisOS(filepath))
+		mverr := os.Rename(localpath+string(os.PathSeparator)+"temp.temp", localpath+samecommon.MakePathSeparatorsForThisOS(filepath))
 		if mverr != nil {
 			return "", errors.New("receiveFile: rename: " + err.Error())
 		}
@@ -770,7 +570,7 @@ func receiveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *auth
 	return "ReceptionComplete", nil
 }
 
-func login(db *sql.DB, auth *authinfo, verbose bool, email string, password string) error {
+func login(db *sql.DB, auth *samecommon.AuthInfo, verbose bool, email string, password string) error {
 	if verbose {
 		fmt.Println("Logging in as email", email, "password", password)
 	}
@@ -808,10 +608,10 @@ func login(db *sql.DB, auth *authinfo, verbose bool, email string, password stri
 		return errors.New("login: " + err.Error())
 	}
 	if subtle.ConstantTimeCompare(pwHashBin1, pwHashBin2) == 1 {
-		auth.userid = userid
-		auth.role = role
+		auth.UserId = userid
+		auth.Role = role
 		if verbose {
-			fmt.Println("    Logged in as email", email, "userid", userid, "role flags:", roleFlagsToString(role))
+			fmt.Println("    Logged in as email", email, "userid", userid, "role flags:", samecommon.RoleFlagsToString(role))
 		}
 		return nil
 	}
@@ -821,11 +621,11 @@ func login(db *sql.DB, auth *authinfo, verbose bool, email string, password stri
 	return errors.New("Incorrect password.")
 }
 
-func listUsers(db *sql.DB, auth *authinfo) ([]listUserInfo, error) {
-	if (auth.role & roleAdmin) == 0 {
+func listUsers(db *sql.DB, auth *samecommon.AuthInfo) ([]samecommon.ListUserInfo, error) {
+	if (auth.Role & samecommon.RoleAdmin) == 0 {
 		return nil, errors.New("Permission denied: User is not assigned to the admin role.")
 	}
-	result := make([]listUserInfo, 0)
+	result := make([]samecommon.ListUserInfo, 0)
 	cmd := "SELECT email, role FROM user WHERE 1 ORDER BY email;"
 	stmtSel, err := db.Prepare(cmd)
 	if err != nil {
@@ -842,16 +642,16 @@ func listUsers(db *sql.DB, auth *authinfo) ([]listUserInfo, error) {
 		if err != nil {
 			return result, errors.New("listUsers: " + err.Error())
 		}
-		result = append(result, listUserInfo{email, role})
+		result = append(result, samecommon.ListUserInfo{email, role})
 	}
 	return result, nil
 }
 
-func addUser(verbose bool, db *sql.DB, auth *authinfo, email string, role int) (string, error) {
+func addUser(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, email string, role int) (string, error) {
 	if verbose {
-		fmt.Println("Attempting to add User " + email + " added with role:" + roleFlagsToString(role))
+		fmt.Println("Attempting to add User " + email + " added with role:" + samecommon.RoleFlagsToString(role))
 	}
-	if (auth.role & roleAdmin) == 0 {
+	if (auth.Role & samecommon.RoleAdmin) == 0 {
 		return "", errors.New("Permission denied: User is not assigned to the admin role.")
 	}
 	tx, err := db.Begin()
@@ -936,16 +736,16 @@ func addUser(verbose bool, db *sql.DB, auth *authinfo, email string, role int) (
 		return password, errors.New("addUser: " + err.Error())
 	}
 	if verbose {
-		fmt.Println("    User " + email + " added with role:" + roleFlagsToString(role))
+		fmt.Println("    User " + email + " added with role:" + samecommon.RoleFlagsToString(role))
 	}
 	return password, nil
 }
 
-func addSyncPoint(verbose bool, db *sql.DB, auth *authinfo, path string) (string, error) {
+func addSyncPoint(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, path string) (string, error) {
 	if verbose {
 		fmt.Println("Adding sync point with path", path)
 	}
-	if (auth.role & roleAdmin) == 0 {
+	if (auth.Role & samecommon.RoleAdmin) == 0 {
 		return "", errors.New("Permission denied: User is not assigned to the admin role.")
 	}
 	if len(path) == 0 {
@@ -1017,11 +817,11 @@ func addSyncPoint(verbose bool, db *sql.DB, auth *authinfo, path string) (string
 	return publicid, nil
 }
 
-func listSyncPoints(db *sql.DB, auth *authinfo) ([]listSyncPointInfo, error) {
-	if (auth.role & roleAdmin) == 0 {
+func listSyncPoints(db *sql.DB, auth *samecommon.AuthInfo) ([]samecommon.ListSyncPointInfo, error) {
+	if (auth.Role & samecommon.RoleAdmin) == 0 {
 		return nil, errors.New("Permission denied: User is not assigned to the admin role.")
 	}
-	result := make([]listSyncPointInfo, 0)
+	result := make([]samecommon.ListSyncPointInfo, 0)
 	cmd := "SELECT publicid, path FROM syncpoint WHERE 1 ORDER BY path;"
 	stmtSel, err := db.Prepare(cmd)
 	if err != nil {
@@ -1038,18 +838,18 @@ func listSyncPoints(db *sql.DB, auth *authinfo) ([]listSyncPointInfo, error) {
 		if err != nil {
 			return result, errors.New("listSyncPoints: " + err.Error())
 		}
-		result = append(result, listSyncPointInfo{publicid, path})
+		result = append(result, samecommon.ListSyncPointInfo{publicid, path})
 	}
 	return result, nil
 }
 
-func addGrant(verbose bool, db *sql.DB, auth *authinfo, email string, syncpublicid string, access int) error {
+func addGrant(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, email string, syncpublicid string, access int) error {
 	if verbose {
 		fmt.Println("Granting access to sync point for user.")
 		fmt.Println("    Email:", email)
 		fmt.Println("    Sync point ID:", syncpublicid)
 	}
-	if (auth.role & roleAdmin) == 0 {
+	if (auth.Role & samecommon.RoleAdmin) == 0 {
 		return errors.New("Permission denied: User is not assigned to the admin role.")
 	}
 	tx, err := db.Begin()
@@ -1164,11 +964,11 @@ func addGrant(verbose bool, db *sql.DB, auth *authinfo, email string, syncpublic
 	return nil
 }
 
-func listGrants(db *sql.DB, auth *authinfo) ([]listGrantInfo, error) {
-	if (auth.role & roleAdmin) == 0 {
+func listGrants(db *sql.DB, auth *samecommon.AuthInfo) ([]samecommon.ListGrantInfo, error) {
+	if (auth.Role & samecommon.RoleAdmin) == 0 {
 		return nil, errors.New("Permission denied: User is not assigned to the admin role.")
 	}
-	result := make([]listGrantInfo, 0)
+	result := make([]samecommon.ListGrantInfo, 0)
 	cmd := "SELECT user.email, syncpoint.publicid, grant.access FROM user, grant, syncpoint WHERE (user.userid = grant.userid) AND (grant.syncptid = syncpoint.syncptid) ORDER BY user.email;"
 	stmtSel, err := db.Prepare(cmd)
 	if err != nil {
@@ -1186,18 +986,18 @@ func listGrants(db *sql.DB, auth *authinfo) ([]listGrantInfo, error) {
 		if err != nil {
 			return result, errors.New("listGrants: " + err.Error())
 		}
-		result = append(result, listGrantInfo{email, publicid, access})
+		result = append(result, samecommon.ListGrantInfo{email, publicid, access})
 	}
 	return result, nil
 }
 
-func deleteGrant(verbose bool, db *sql.DB, auth *authinfo, email string, syncpublicid string) error {
+func deleteGrant(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, email string, syncpublicid string) error {
 	if verbose {
 		fmt.Println("Revoking access to sync point for user.")
 		fmt.Println("    Email:", email)
 		fmt.Println("    Sync point ID:", syncpublicid)
 	}
-	if (auth.role & roleAdmin) == 0 {
+	if (auth.Role & samecommon.RoleAdmin) == 0 {
 		return errors.New("Permission denied: User is not assigned to the admin role.")
 	}
 	tx, err := db.Begin()
@@ -1308,12 +1108,12 @@ func deleteGrant(verbose bool, db *sql.DB, auth *authinfo, email string, syncpub
 	return nil
 }
 
-func deleteSyncPoint(verbose bool, db *sql.DB, auth *authinfo, syncpublicid string) error {
+func deleteSyncPoint(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, syncpublicid string) error {
 	if verbose {
 		fmt.Println("Deleting sync point")
 		fmt.Println("    Sync point ID:", syncpublicid)
 	}
-	if (auth.role & roleAdmin) == 0 {
+	if (auth.Role & samecommon.RoleAdmin) == 0 {
 		return errors.New("Permission denied: User is not assigned to the admin role.")
 	}
 	tx, err := db.Begin()
@@ -1374,12 +1174,12 @@ func deleteSyncPoint(verbose bool, db *sql.DB, auth *authinfo, syncpublicid stri
 	return nil
 }
 
-func deleteUser(verbose bool, db *sql.DB, auth *authinfo, email string) error {
+func deleteUser(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, email string) error {
 	if verbose {
 		fmt.Println("Deleting user")
 		fmt.Println("    Email:", email)
 	}
-	if (auth.role & roleAdmin) == 0 {
+	if (auth.Role & samecommon.RoleAdmin) == 0 {
 		return errors.New("Permission denied: User is not assigned to the admin role.")
 	}
 	tx, err := db.Begin()
@@ -1440,11 +1240,11 @@ func deleteUser(verbose bool, db *sql.DB, auth *authinfo, email string) error {
 	return nil
 }
 
-func getServerTreeForSyncPoint(verbose bool, db *sql.DB, auth *authinfo, syncpublicid string) ([]wfileInfo, error) {
+func getServerTreeForSyncPoint(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, syncpublicid string) ([]samecommon.SameFileInfo, error) {
 	if verbose {
 		fmt.Println("Retrieving files for sync point:", syncpublicid)
 	}
-	if (auth.role & roleSyncPointUser) == 0 {
+	if (auth.Role & samecommon.RoleSyncPointUser) == 0 {
 		return nil, errors.New("Permission denied: User is not assigned to the sync point user role.")
 	}
 	cmd := "SELECT syncptid FROM syncpoint WHERE publicid = ?;"
@@ -1489,7 +1289,7 @@ func getServerTreeForSyncPoint(verbose bool, db *sql.DB, auth *authinfo, syncpub
 	var filehash string
 	var reupi int
 	var reup bool
-	result := make([]wfileInfo, 0)
+	result := make([]samecommon.SameFileInfo, 0)
 	for rowsFileInfo.Next() {
 		err = rowsFileInfo.Scan(&filepath, &modtime, &filehash, &reupi)
 		if err != nil {
@@ -1503,22 +1303,22 @@ func getServerTreeForSyncPoint(verbose bool, db *sql.DB, auth *authinfo, syncpub
 		} else {
 			reup = true
 		}
-		result = append(result, wfileInfo{filepath, 0, modtime, filehash, reup})
+		result = append(result, samecommon.SameFileInfo{filepath, 0, modtime, filehash, reup})
 	}
 	return result, nil
 }
 
-func sendFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *authinfo, syncpublicid string, filepath string, filehash string) (string, error) {
+func sendFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *samecommon.AuthInfo, syncpublicid string, filepath string, filehash string) (string, error) {
 	//
 	// Step 1: Find the local file and check permissions
 	if verbose {
 		fmt.Println("Sending: ", filepath)
 	}
-	if (auth.role & roleSyncPointUser) == 0 {
+	if (auth.Role & samecommon.RoleSyncPointUser) == 0 {
 		wnet.Close()
 		return "", errors.New("Permission denied: User is not assigned to the sync point user role.")
 	}
-	syncptid, localpath, err := determineAccessForSyncPoint(verbose, db, auth, syncpublicid, accessRead)
+	syncptid, localpath, err := determineAccessForSyncPoint(verbose, db, auth, syncpublicid, samecommon.AccessRead)
 	if err != nil {
 		return "", err
 	}
@@ -1533,7 +1333,7 @@ func sendFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *authinf
 	if ourFileHash != filehash {
 		return "", errors.New("SendFile: hash requested does not match server's hash of that file. File:" + `"` + filepath + `"` + ".")
 	}
-	localfilepath := localpath + makePathSeparatorsForThisOS(filepath)
+	localfilepath := localpath + samecommon.MakePathSeparatorsForThisOS(filepath)
 	info, err := os.Stat(localfilepath)
 	noexist := false
 	if err != nil {
@@ -1682,14 +1482,14 @@ func sendFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *authinf
 	return result, nil
 }
 
-func markFileDeleted(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *authinfo, syncpublicid string, filepath string, modtime int64, filehash string) error {
+func markFileDeleted(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *samecommon.AuthInfo, syncpublicid string, filepath string, modtime int64, filehash string) error {
 	if verbose {
 		fmt.Println("Marking file deleted:")
 		fmt.Println("    Sync Point ID:", syncpublicid)
 		fmt.Println("    File:", filepath)
 		fmt.Println("    Remote hash:", filehash)
 	}
-	syncptid, localpath, err := determineAccessForSyncPoint(verbose, db, auth, syncpublicid, accessWrite)
+	syncptid, localpath, err := determineAccessForSyncPoint(verbose, db, auth, syncpublicid, samecommon.AccessWrite)
 	if err != nil {
 		return err
 	}
@@ -1704,8 +1504,7 @@ func markFileDeleted(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *
 	if ourFileHash != filehash {
 		return errors.New("MarkFileDeleted: hashes do not match. To protect against accidental deletions, only the most recent version of the file (as known to the server) can be deleted. Use same -u to undelete deleted files with the most recent versions. File:" + `"` + filepath + `"` + ".")
 	}
-	localfilepath := localpath + string(os.PathSeparator) + makePathSeparatorsForThisOS(filepath)
-
+	localfilepath := localpath + string(os.PathSeparator) + samecommon.MakePathSeparatorsForThisOS(filepath)
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -1728,7 +1527,7 @@ func markFileDeleted(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *
 }
 
 // Returns: new generated password. (Remember, users are not allowed to choose their own passwords.)
-func resetUserPassword(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *authinfo, email string) (string, error) {
+func resetUserPassword(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *samecommon.AuthInfo, email string) (string, error) {
 	fmt.Println("Resetting user password for:", email)
 	cmd := "SELECT userid FROM user WHERE (email = ?);"
 	stmtSel, err := db.Prepare(cmd)
@@ -1747,18 +1546,18 @@ func resetUserPassword(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth
 			return "", err
 		}
 	}
-	if auth.userid == 0 {
+	if auth.UserId == 0 {
 		return "", errors.New("ResetUserPassword: User " + `"` + email + `"` + " not found.")
 	}
 	if verbose {
 		fmt.Println("    User ID is:", userid)
 	}
-	if auth.userid == 0 {
+	if auth.UserId == 0 {
 		return "", errors.New("ResetUserPassword: Not logged in.")
 	}
-	if (auth.userid & roleAdmin) == 0 {
+	if (auth.UserId & samecommon.RoleAdmin) == 0 {
 		// not admin -- is user resetting their own password?
-		if auth.userid != userid {
+		if auth.UserId != userid {
 			return "", errors.New("ResetUserPassword: Permission denied.")
 		}
 	}
@@ -1808,7 +1607,7 @@ func unmGetTime(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection) error {
 	return nil
 }
 
-func unmReceiveFile(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *authinfo, verbose bool) error {
+func unmReceiveFile(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *samecommon.AuthInfo, verbose bool) error {
 	if version != 0 {
 		fmt.Println("ReceiveFile: Wrong version number")
 	}
@@ -1842,7 +1641,7 @@ func unmReceiveFile(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *
 	return nil
 }
 
-func unmLogin(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *authinfo, verbose bool) error {
+func unmLogin(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *samecommon.AuthInfo, verbose bool) error {
 	if version != 0 {
 		return errors.New("Login: Version number mismatch.")
 	}
@@ -1859,7 +1658,7 @@ func unmLogin(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB
 	return nil
 }
 
-func unmListUsers(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *authinfo, verbose bool) error {
+func unmListUsers(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *samecommon.AuthInfo, verbose bool) error {
 	if version != 0 {
 		return errors.New("ListUsers: Version number mismatch.")
 	}
@@ -1871,8 +1670,8 @@ func unmListUsers(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sq
 	reply.AddColumn("", wrpc.ColInt)
 	for ii := 0; ii < len(userlist); ii++ {
 		reply.StartRow()
-		reply.AddRowColumnString(userlist[ii].email)
-		reply.AddRowColumnInt(int64(userlist[ii].role))
+		reply.AddRowColumnString(userlist[ii].Email)
+		reply.AddRowColumnInt(int64(userlist[ii].Role))
 	}
 	reply.StartTable("success", 1, 1)
 	reply.AddColumn("", wrpc.ColString)
@@ -1882,7 +1681,7 @@ func unmListUsers(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sq
 	return err
 }
 
-func unmAddUser(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *authinfo, verbose bool) error {
+func unmAddUser(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *samecommon.AuthInfo, verbose bool) error {
 	if version != 0 {
 		return errors.New("AddUser: Version number mismatch.")
 	}
@@ -1910,7 +1709,7 @@ func unmAddUser(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.
 	return err
 }
 
-func unmAddSyncPoint(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *authinfo, verbose bool) error {
+func unmAddSyncPoint(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *samecommon.AuthInfo, verbose bool) error {
 	if version != 0 {
 		return errors.New("AddSyncPoint: Version number mismatch.")
 	}
@@ -1928,7 +1727,7 @@ func unmAddSyncPoint(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db 
 	return err
 }
 
-func unmListSyncPoints(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *authinfo, verbose bool) error {
+func unmListSyncPoints(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *samecommon.AuthInfo, verbose bool) error {
 	if version != 0 {
 		return errors.New("ListSyncPoints: Version number mismatch.")
 	}
@@ -1940,8 +1739,8 @@ func unmListSyncPoints(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, d
 	reply.AddColumn("", wrpc.ColString)
 	for ii := 0; ii < len(syncpointlist); ii++ {
 		reply.StartRow()
-		reply.AddRowColumnString(syncpointlist[ii].publicid)
-		reply.AddRowColumnString(syncpointlist[ii].path)
+		reply.AddRowColumnString(syncpointlist[ii].PublicId)
+		reply.AddRowColumnString(syncpointlist[ii].Path)
 	}
 	reply.StartTable("success", 1, 1)
 	reply.AddColumn("", wrpc.ColString)
@@ -1951,7 +1750,7 @@ func unmListSyncPoints(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, d
 	return err
 }
 
-func unmAddGrant(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *authinfo, verbose bool) error {
+func unmAddGrant(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *samecommon.AuthInfo, verbose bool) error {
 	if version != 0 {
 		return errors.New("AddGrant: Version number mismatch.")
 	}
@@ -1972,7 +1771,7 @@ func unmAddGrant(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql
 	return wrpc.SendReplyVoid("AddGrant", version, errorToString(err), wnet)
 }
 
-func unmListGrants(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *authinfo, verbose bool) error {
+func unmListGrants(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *samecommon.AuthInfo, verbose bool) error {
 	if version != 0 {
 		return errors.New("ListGrants: Version number mismatch.")
 	}
@@ -1985,9 +1784,9 @@ func unmListGrants(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *s
 	reply.AddColumn("", wrpc.ColInt)
 	for ii := 0; ii < len(grantlist); ii++ {
 		reply.StartRow()
-		reply.AddRowColumnString(grantlist[ii].email)
-		reply.AddRowColumnString(grantlist[ii].publicid)
-		reply.AddRowColumnInt(int64(grantlist[ii].access))
+		reply.AddRowColumnString(grantlist[ii].Email)
+		reply.AddRowColumnString(grantlist[ii].PublicId)
+		reply.AddRowColumnInt(int64(grantlist[ii].Access))
 	}
 	reply.StartTable("success", 1, 1)
 	reply.AddColumn("", wrpc.ColString)
@@ -1997,7 +1796,7 @@ func unmListGrants(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *s
 	return err
 }
 
-func unmDeleteGrant(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *authinfo, verbose bool) error {
+func unmDeleteGrant(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *samecommon.AuthInfo, verbose bool) error {
 	if version != 0 {
 		return errors.New("DeleteGrant: Version number mismatch.")
 	}
@@ -2013,7 +1812,7 @@ func unmDeleteGrant(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *
 	return wrpc.SendReplyVoid("DeleteGrant", version, errorToString(err), wnet)
 }
 
-func unmDeleteSyncPoint(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *authinfo, verbose bool) error {
+func unmDeleteSyncPoint(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *samecommon.AuthInfo, verbose bool) error {
 	if version != 0 {
 		return errors.New("DeleteSyncPoint: Version number mismatch.")
 	}
@@ -2025,7 +1824,7 @@ func unmDeleteSyncPoint(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, 
 	return wrpc.SendReplyVoid("DeleteSyncPoint", version, errorToString(err), wnet)
 }
 
-func unmDeleteUser(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *authinfo, verbose bool) error {
+func unmDeleteUser(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *samecommon.AuthInfo, verbose bool) error {
 	if version != 0 {
 		return errors.New("DeleteUser: Version number mismatch.")
 	}
@@ -2037,7 +1836,7 @@ func unmDeleteUser(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *s
 	return wrpc.SendReplyVoid("DeleteUser", version, errorToString(err), wnet)
 }
 
-func unmGetServerTreeForSyncPoint(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *authinfo, verbose bool) error {
+func unmGetServerTreeForSyncPoint(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *samecommon.AuthInfo, verbose bool) error {
 	if version != 0 {
 		return errors.New("GetServerTreeForSyncPoint: Version number mismatch.")
 	}
@@ -2055,10 +1854,10 @@ func unmGetServerTreeForSyncPoint(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetCo
 	reply.AddColumn("reupneeded", wrpc.ColBool)
 	for ii := 0; ii < len(filelist); ii++ {
 		reply.StartRow()
-		reply.AddRowColumnString(filelist[ii].filePath)
-		reply.AddRowColumnInt(int64(filelist[ii].fileTime))
-		reply.AddRowColumnString(filelist[ii].fileHash)
-		reply.AddRowColumnBool(filelist[ii].reupNeeded)
+		reply.AddRowColumnString(filelist[ii].FilePath)
+		reply.AddRowColumnInt(int64(filelist[ii].FileTime))
+		reply.AddRowColumnString(filelist[ii].FileHash)
+		reply.AddRowColumnBool(filelist[ii].ReUpNeeded)
 	}
 	reply.StartTable("success", 1, 1)
 	reply.AddColumn("success", wrpc.ColString)
@@ -2068,7 +1867,7 @@ func unmGetServerTreeForSyncPoint(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetCo
 	return err
 }
 
-func unmSendFile(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *authinfo, verbose bool) error {
+func unmSendFile(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *samecommon.AuthInfo, verbose bool) error {
 	if version != 0 {
 		return errors.New("SendFile: Version number mismatch.")
 	}
@@ -2091,7 +1890,7 @@ func unmSendFile(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql
 	return nil
 }
 
-func unmMarkFileDeleted(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *authinfo, verbose bool) error {
+func unmMarkFileDeleted(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *samecommon.AuthInfo, verbose bool) error {
 	if version != 0 {
 		return errors.New("MarkFileDeleted: Version number mismatch.")
 	}
@@ -2115,7 +1914,7 @@ func unmMarkFileDeleted(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, 
 	return wrpc.SendReplyVoid("MarkFileDeleted", version, errorToString(err), wnet)
 }
 
-func unmResetUserPassword(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *authinfo, verbose bool) error {
+func unmResetUserPassword(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *samecommon.AuthInfo, verbose bool) error {
 	if version != 0 {
 		return errors.New("ResetUserPassword: Version number mismatch.")
 	}
@@ -2141,7 +1940,7 @@ func sendDispatchErrorReply(wnet wrpc.IWNetConnection, errmsg string) error {
 	return reply.SendDB(wnet)
 }
 
-func dispatch(fcname string, version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *authinfo, verbose bool) error {
+func dispatch(fcname string, version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *samecommon.AuthInfo, verbose bool) error {
 	if verbose {
 		fmt.Println("Dispatching to function:", fcname)
 	}
@@ -2188,9 +1987,9 @@ func dispatch(fcname string, version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnect
 }
 
 func handleConnection(conn net.Conn, verose bool, db *sql.DB, symkey []byte, hmackey []byte, verbose bool) {
-	var auth authinfo
-	auth.userid = 0
-	auth.role = 0
+	var auth samecommon.AuthInfo
+	auth.UserId = 0
+	auth.Role = 0
 	wnet := wrpc.NewConnection()
 	wnet.SetKeys(symkey, hmackey)
 	for {
@@ -2235,21 +2034,6 @@ func getLine(reader *bufio.Reader) (string, error) {
 	return trim(result), err
 }
 
-func fileExists(filepath string) (bool, error) {
-	fhFile, err := os.Open(makePathSeparatorsForThisOS(filepath))
-	if err != nil {
-		message := err.Error()
-		if message[len(message)-25:] == "no such file or directory" {
-			return false, nil
-		}
-		if err != nil {
-			return false, err
-		}
-	}
-	err = fhFile.Close()
-	return true, err
-}
-
 func main() {
 	vflag := flag.Bool("v", false, "verbose mode")
 	gflag := flag.Bool("g", false, "generate key")
@@ -2291,7 +2075,7 @@ func main() {
 		fmt.Println("Initialized.")
 		return
 	}
-	exist, err := fileExists(databaseFileName)
+	exist, err := samecommon.FileExists(databaseFileName)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -2303,20 +2087,24 @@ func main() {
 	db, err := sql.Open("sqlite3", databaseFileName)
 	defer db.Close()
 	if generateKeys {
-		symkey, err := generateAESKey()
+		symkey, err := samecommon.GenerateAESKey()
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
-		hmackey, err := generateSHAKey()
+		hmackey, err := samecommon.GenerateSHAKey()
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
 		fmt.Println(hex.EncodeToString(symkey))
 		fmt.Println(hex.EncodeToString(hmackey))
-		setNameValuePair(db, "symmetrickey", hex.EncodeToString(symkey), verbose, false)
-		setNameValuePair(db, "hmackey", hex.EncodeToString(hmackey), verbose, false)
+		samecommon.SetNameValuePair(db, "symmetrickey", hex.EncodeToString(symkey))
+		samecommon.SetNameValuePair(db, "hmackey", hex.EncodeToString(hmackey))
+		if verbose {
+			fmt.Println("Symmetric key set to:", hex.EncodeToString(symkey))
+			fmt.Println("HMAC key set to:", hex.EncodeToString(hmackey))
+		}
 		return
 	}
 	if createAdmin {
@@ -2340,16 +2128,19 @@ func main() {
 			}
 			portnum = strToInt(ptStr)
 		}
-		setNameValuePair(db, "port", intToStr(portnum), verbose, false)
+		samecommon.SetNameValuePair(db, "port", intToStr(portnum))
 		if verbose {
 			fmt.Println("Port number set to", portnum)
 		}
 		return
 	}
-	ptNum, err := getValue(db, "port", "", verbose)
+	ptNum, err := samecommon.GetValue(db, "port", "")
 	if err != nil {
 		fmt.Println(err)
 		return
+	}
+	if verbose {
+		fmt.Println("Port number:", ptNum)
 	}
 	portnum := strToInt(ptNum)
 	if portnum == 0 {
@@ -2358,16 +2149,22 @@ func main() {
 		return
 	}
 
-	symKeyStr, err := getValue(db, "symmetrickey", "", verbose)
+	symKeyStr, err := samecommon.GetValue(db, "symmetrickey", "")
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
+	if verbose {
+		fmt.Println("Symmetric key", symKeyStr)
+	}
 
-	hmacKeyStr, err := getValue(db, "hmackey", "", verbose)
+	hmacKeyStr, err := samecommon.GetValue(db, "hmackey", "")
 	if err != nil {
 		fmt.Println(err)
 		return
+	}
+	if verbose {
+		fmt.Println("HMAC key", hmacKeyStr)
 	}
 	symkey, err := hex.DecodeString(symKeyStr)
 	if err != nil {

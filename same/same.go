@@ -12,6 +12,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"io"
 	"os"
+	"samecommon"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,26 +20,9 @@ import (
 	"wrpc"
 )
 
-// "crypto/rand"
-// "encoding/base64"
-
-type wfileInfo struct {
-	filePath   string
-	fileSize   int64
-	fileTime   int64
-	fileHash   string
-	reupNeeded bool
+type fileSortSlice struct {
+	theSlice []samecommon.SameFileInfo
 }
-
-type wfileSortSlice struct {
-	theSlice []wfileInfo
-}
-
-const roleAdmin = 1
-const roleSyncPointUser = 2
-
-const accessRead = 1
-const accessWrite = 2
 
 const databaseFileName = ".samestate"
 const tempFileName = "temp.temp"
@@ -83,7 +67,7 @@ func openConnection(symmetricKey []byte, hmacKey []byte, remoteHost string, port
 	return wnet, err
 }
 
-func standardReply(wnet wrpc.IWNetConnection, fcname string) (wrpc.IWRPC, error) {
+func dupqstandardReply(wnet wrpc.IWNetConnection, fcname string) (wrpc.IWRPC, error) {
 	replmsg, err := wnet.NextMessage()
 	if err != nil {
 		return nil, err
@@ -105,8 +89,8 @@ func standardReply(wnet wrpc.IWNetConnection, fcname string) (wrpc.IWRPC, error)
 	return reply, nil
 }
 
-func standardStringReply(wnet wrpc.IWNetConnection, fcname string) (string, string, error) {
-	reply, err := standardReply(wnet, fcname)
+func dupqstandardStringReply(wnet wrpc.IWNetConnection, fcname string) (string, string, error) {
+	reply, err := wrpc.StandardReply(wnet, fcname)
 	if err != nil {
 		return "", "", err
 	}
@@ -121,8 +105,8 @@ func standardStringReply(wnet wrpc.IWNetConnection, fcname string) (string, stri
 	return result, errmsg, nil
 }
 
-func standardVoidReply(wnet wrpc.IWNetConnection, fcname string) (string, error) {
-	reply, err := standardReply(wnet, fcname)
+func dupqstandardVoidReply(wnet wrpc.IWNetConnection, fcname string) (string, error) {
+	reply, err := wrpc.StandardReply(wnet, fcname)
 	if err != nil {
 		return "", err
 	}
@@ -133,50 +117,8 @@ func standardVoidReply(wnet wrpc.IWNetConnection, fcname string) (string, error)
 	return errmsg, nil
 }
 
-// This function converts all path separators to a stardard form
-// (forward slash) for us to store in the database.
-// Having a standard form means it will match requests correctly
-// no matter what OS the client is using.
-func makePathSeparatorsStandard(filepath string) string {
-	asbytes := []byte(filepath)
-	lasb := len(asbytes)
-	for ii := 0; ii < lasb; ii++ {
-		if asbytes[ii] == '\\' {
-			asbytes[ii] = '/'
-		}
-	}
-	return string(asbytes)
-}
-
-// This function converts all path separators to whatever our actual OS uses
-func makePathSeparatorsForThisOS(filepath string) string {
-	asbytes := []byte(filepath)
-	lasb := len(asbytes)
-	for ii := 0; ii < lasb; ii++ {
-		if (asbytes[ii] == '/') || (asbytes[ii] == '\\') {
-			asbytes[ii] = os.PathSeparator
-		}
-	}
-	return string(asbytes)
-}
-
-// This function converts all path separators to whatever our actual OS uses
-func makePathForFile(filepath string) error {
-	last := -1
-	lfp := len(filepath)
-	for ii := 0; ii < lfp; ii++ {
-		if filepath[ii] == os.PathSeparator {
-			last = ii
-		}
-	}
-	if last <= 0 {
-		return nil
-	}
-	return os.MkdirAll(filepath[:last], 0777)
-}
-
 func stashFileInfo(db *sql.DB, filepath string, filesize int64, filetime int64, filehash string) error {
-	filepath = makePathSeparatorsStandard(filepath)
+	filepath = samecommon.MakePathSeparatorsStandard(filepath)
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -234,7 +176,7 @@ func rpcGetTime(wnet wrpc.IWNetConnection) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	reply, err := standardReply(wnet, "GetTime")
+	reply, err := wrpc.StandardReply(wnet, "GetTime")
 	if err != nil {
 		return 0, err
 	}
@@ -265,42 +207,8 @@ func rpcLogin(wnet wrpc.IWNetConnection, email string, password string) (string,
 	if err != nil {
 		return "", err
 	}
-	errmsg, err := standardVoidReply(wnet, "Login")
+	errmsg, err := wrpc.StandardVoidReply(wnet, "Login")
 	return errmsg, err
-}
-
-func roleFlagsToString(roleflags int) string {
-	result := ""
-	if roleflags == 0 {
-		return result
-	}
-	if (roleflags & roleAdmin) != 0 {
-		result += ", Admin"
-	}
-	if (roleflags & roleSyncPointUser) != 0 {
-		result += ", Sync point user"
-	}
-	return result[2:]
-}
-
-func accessFlagsToString(access int) string {
-	result := ""
-	if access == 0 {
-		return result
-	}
-	if access == accessRead {
-		return "Read Only"
-	}
-	if access == accessWrite {
-		return "Write Only"
-	}
-	if (access & accessRead) != 0 {
-		result += ", Read"
-	}
-	if (access & accessWrite) != 0 {
-		result += ", Write"
-	}
-	return result[2:]
 }
 
 func rpcListUsers(wnet wrpc.IWNetConnection) string {
@@ -310,7 +218,7 @@ func rpcListUsers(wnet wrpc.IWNetConnection) string {
 	if err != nil {
 		return err.Error()
 	}
-	reply, err := standardReply(wnet, "ListUsers")
+	reply, err := wrpc.StandardReply(wnet, "ListUsers")
 	if err != nil {
 		return err.Error()
 	}
@@ -325,7 +233,7 @@ func rpcListUsers(wnet wrpc.IWNetConnection) string {
 			return err.Error()
 		}
 		role := int(role64)
-		fmt.Println(email, "-", roleFlagsToString(role))
+		fmt.Println(email, "-", samecommon.RoleFlagsToString(role))
 	}
 	errmsg, err := reply.GetString(1, 0, 0)
 	if err != nil {
@@ -347,7 +255,7 @@ func rpcAddUser(wnet wrpc.IWNetConnection, email string, role int) (string, stri
 	if err != nil {
 		return "", "", err
 	}
-	reply, err := standardReply(wnet, "AddUser")
+	reply, err := wrpc.StandardReply(wnet, "AddUser")
 	if err != nil {
 		return "", "", err
 	}
@@ -370,7 +278,7 @@ func rpcAddSyncPoint(wnet wrpc.IWNetConnection, path string) (string, string, er
 	rpc.StartRow()
 	rpc.AddRowColumnString(path)
 	rpc.SendDB(wnet)
-	reply, err := standardReply(wnet, "AddSyncPoint")
+	reply, err := wrpc.StandardReply(wnet, "AddSyncPoint")
 	if err != nil {
 		return "", "", err
 	}
@@ -392,7 +300,7 @@ func rpcListSyncPoints(wnet wrpc.IWNetConnection, server string) string {
 	if err != nil {
 		return err.Error()
 	}
-	reply, err := standardReply(wnet, "ListSyncPoints")
+	reply, err := wrpc.StandardReply(wnet, "ListSyncPoints")
 	if err != nil {
 		return err.Error()
 	}
@@ -436,7 +344,7 @@ func rpcAddGrant(wnet wrpc.IWNetConnection, email string, syncpublicid string, a
 	if err != nil {
 		return "", err
 	}
-	errmsg, err := standardVoidReply(wnet, "AddGrant")
+	errmsg, err := wrpc.StandardVoidReply(wnet, "AddGrant")
 	return errmsg, err
 }
 
@@ -447,7 +355,7 @@ func rpcListGrants(wnet wrpc.IWNetConnection) string {
 	if err != nil {
 		return err.Error()
 	}
-	reply, err := standardReply(wnet, "ListGrants")
+	reply, err := wrpc.StandardReply(wnet, "ListGrants")
 	if err != nil {
 		return err.Error()
 	}
@@ -466,7 +374,7 @@ func rpcListGrants(wnet wrpc.IWNetConnection) string {
 			return err.Error()
 		}
 		access := int(access64)
-		fmt.Println(email, "-> has access to sync point ->", publicid, "-> with permissions:", accessFlagsToString(access))
+		fmt.Println(email, "-> has access to sync point ->", publicid, "-> with permissions:", samecommon.AccessFlagsToString(access))
 	}
 	errmsg, err := reply.GetString(1, 0, 0)
 	if err != nil {
@@ -486,7 +394,7 @@ func rpcDeleteUser(wnet wrpc.IWNetConnection, email string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	errmsg, err := standardVoidReply(wnet, "DeleteUser")
+	errmsg, err := wrpc.StandardVoidReply(wnet, "DeleteUser")
 	return errmsg, err
 }
 
@@ -501,7 +409,7 @@ func rpcDeleteSyncPoint(wnet wrpc.IWNetConnection, path string) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	errmsg, err := standardVoidReply(wnet, "DeleteSyncPoint")
+	errmsg, err := wrpc.StandardVoidReply(wnet, "DeleteSyncPoint")
 	return errmsg, err
 }
 
@@ -518,11 +426,11 @@ func rpcDeleteGrant(wnet wrpc.IWNetConnection, email string, syncpublicid string
 	if err != nil {
 		return "", err
 	}
-	errmsg, err := standardVoidReply(wnet, "DeleteGrant")
+	errmsg, err := wrpc.StandardVoidReply(wnet, "DeleteGrant")
 	return errmsg, err
 }
 
-func rpcGetServerTreeForSyncPoint(wnet wrpc.IWNetConnection, syncpublicid string) ([]wfileInfo, error) {
+func rpcGetServerTreeForSyncPoint(wnet wrpc.IWNetConnection, syncpublicid string) ([]samecommon.SameFileInfo, error) {
 	rpc := wrpc.NewDB()
 	rpc.StartDB("GetServerTreeForSyncPoint", 0, 1)
 	rpc.StartTable("", 0, 0)
@@ -533,7 +441,7 @@ func rpcGetServerTreeForSyncPoint(wnet wrpc.IWNetConnection, syncpublicid string
 	if err != nil {
 		return nil, err
 	}
-	reply, err := standardReply(wnet, "GetServerTreeForSyncPoint")
+	reply, err := wrpc.StandardReply(wnet, "GetServerTreeForSyncPoint")
 	if err != nil {
 		return nil, err
 	}
@@ -545,7 +453,7 @@ func rpcGetServerTreeForSyncPoint(wnet wrpc.IWNetConnection, syncpublicid string
 		return nil, errors.New(errmsg)
 	}
 	num := reply.GetNumRows(0)
-	result := make([]wfileInfo, 0)
+	result := make([]samecommon.SameFileInfo, 0)
 	for ii := 0; ii < num; ii++ {
 		filepath, err := reply.GetString(0, ii, 0)
 		if err != nil {
@@ -563,7 +471,7 @@ func rpcGetServerTreeForSyncPoint(wnet wrpc.IWNetConnection, syncpublicid string
 		if err != nil {
 			return nil, err
 		}
-		result = append(result, wfileInfo{filepath, 0, filetime, filehash, reup})
+		result = append(result, samecommon.SameFileInfo{filepath, 0, filetime, filehash, reup})
 	}
 	return result, nil
 }
@@ -639,7 +547,7 @@ func sendFile(wnet wrpc.IWNetConnection, syncpublicid string, localdir string, l
 	buffer := make([]byte, 32768)
 	ciphertext := make([]byte, 32768) // allocated here as a memory management optimization
 	//
-	fh, err := os.Open(makePathSeparatorsForThisOS(localfilepath))
+	fh, err := os.Open(samecommon.MakePathSeparatorsForThisOS(localfilepath))
 	if err != nil {
 		panic(err)
 	}
@@ -777,7 +685,7 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 	if verbose {
 		fmt.Println("    Attempting to output to file:", localdir, string(os.PathSeparator)+tempFileName)
 	}
-	fhOut, err = os.Create(makePathSeparatorsForThisOS(localdir + string(os.PathSeparator) + tempFileName))
+	fhOut, err = os.Create(samecommon.MakePathSeparatorsForThisOS(localdir + string(os.PathSeparator) + tempFileName))
 	if err != nil {
 		return "receiveFile: " + err.Error()
 	}
@@ -817,12 +725,12 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 	// file into place, removing the existing file that we have
 	// preserved up until this time in case something went wrong
 	if verbose {
-		fmt.Println("    Renaming", localdir+string(os.PathSeparator)+tempFileName, "to", localdir+makePathSeparatorsForThisOS(filepath))
+		fmt.Println("    Renaming", localdir+string(os.PathSeparator)+tempFileName, "to", localdir+samecommon.MakePathSeparatorsForThisOS(filepath))
 	}
-	finalDestinationPath := makePathSeparatorsForThisOS(localdir + filepath)
+	finalDestinationPath := samecommon.MakePathSeparatorsForThisOS(localdir + filepath)
 	err = os.Rename(localdir+string(os.PathSeparator)+tempFileName, finalDestinationPath)
 	if err != nil {
-		mkerr := makePathForFile(localdir + makePathSeparatorsForThisOS(filepath))
+		mkerr := samecommon.MakePathForFile(localdir + samecommon.MakePathSeparatorsForThisOS(filepath))
 		if mkerr != nil {
 			return "receiveFile: " + err.Error()
 		}
@@ -897,7 +805,7 @@ func rpcMarkFileDeleted(verbose bool, wnet wrpc.IWNetConnection, syncpublicid st
 	if err != nil {
 		return "", err
 	}
-	errmsg, err := standardVoidReply(wnet, "MarkFileDeleted")
+	errmsg, err := wrpc.StandardVoidReply(wnet, "MarkFileDeleted")
 	return errmsg, err
 }
 
@@ -912,7 +820,7 @@ func rpcResetUserPassword(wnet wrpc.IWNetConnection, email string) (string, stri
 	if err != nil {
 		return "", "", err
 	}
-	password, errmsg, err := standardStringReply(wnet, "ResetUserPassword")
+	password, errmsg, err := wrpc.StandardStringReply(wnet, "ResetUserPassword")
 	return password, errmsg, err
 }
 
@@ -929,7 +837,7 @@ func onOff(bv bool) string {
 }
 
 func fileExists(filepath string) bool {
-	fhFile, err := os.Open(makePathSeparatorsForThisOS(filepath))
+	fhFile, err := os.Open(samecommon.MakePathSeparatorsForThisOS(filepath))
 	if err != nil {
 		message := err.Error()
 		if message[len(message)-25:] == "no such file or directory" {
@@ -1021,7 +929,7 @@ func initializeDatabase(db *sql.DB) {
 	checkError(err)
 }
 
-func setNameValuePair(db *sql.DB, name string, value string, verbose bool, protectExistingValue bool) {
+func dupsetNameValuePair(db *sql.DB, name string, value string) {
 	tx, err := db.Begin()
 	checkError(err)
 	cmd := "SELECT nvpairid FROM settings WHERE name = ?;"
@@ -1043,10 +951,6 @@ func setNameValuePair(db *sql.DB, name string, value string, verbose bool, prote
 		_, err = stmtIns.Exec(name, value)
 		checkError(err)
 	} else {
-		if protectExistingValue {
-			tx.Rollback()
-			return
-		}
 		cmd = "UPDATE settings SET value = ? where nvpairid = ?;"
 		stmtUpd, err := tx.Prepare(cmd)
 		_, err = stmtUpd.Exec(value, nvpairid)
@@ -1054,12 +958,9 @@ func setNameValuePair(db *sql.DB, name string, value string, verbose bool, prote
 	}
 	err = tx.Commit()
 	checkError(err)
-	if verbose {
-		fmt.Println("Set configuration setting:", name, "=", value)
-	}
 }
 
-func getValue(db *sql.DB, name string, defval string, verbose bool) string {
+func getValue(db *sql.DB, name string, defval string) string {
 	var value string
 	value = defval
 	cmd := "SELECT value FROM settings WHERE name = ?;"
@@ -1071,45 +972,41 @@ func getValue(db *sql.DB, name string, defval string, verbose bool) string {
 		err = rows.Scan(&value)
 		checkError(err)
 	}
-	if verbose {
-		fmt.Println(name, "=", value)
-	}
 	return value
 }
 
 func showConfiguration(db *sql.DB, verbose bool) {
-	server := getValue(db, "server", "", verbose)
-	ptStr := getValue(db, "port", "0", verbose)
+	server := getValue(db, "server", "")
+	ptStr := getValue(db, "port", "0")
 	port := strToInt(ptStr)
-	email := getValue(db, "email", "", verbose)
-	password := getValue(db, "password", "", false)
-	syncPointID := getValue(db, "syncpointid", "", verbose)
+	email := getValue(db, "email", "")
+	password := getValue(db, "password", "")
+	syncPointID := getValue(db, "syncpointid", "")
 	fmt.Println("Server:", server)
 	fmt.Println("Port:", port)
 	fmt.Println("Email:", email)
 	fmt.Println("Password:", password)
 	fmt.Println("Sync point ID:", syncPointID)
 
-	serverSymKey := getValue(db, "serversymkey", "", verbose)
-	if serverSymKey != "" {
-		fmt.Println("Server key:")
+	serverSymKey := getValue(db, "serversymkey", "")
+	if serverSymKey == "" {
+		fmt.Println("Server key (next two lines):")
 		fmt.Println(serverSymKey)
 	}
-	serverHmacKey := getValue(db, "serverhmackey", "", verbose)
+	serverHmacKey := getValue(db, "serverhmackey", "")
 	if serverHmacKey != "" {
 		fmt.Println(serverHmacKey)
 	}
 
-	endToEndSymKey := getValue(db, "endtoendsymkey", "", verbose)
+	endToEndSymKey := getValue(db, "endtoendsymkey", "")
 	if endToEndSymKey != "" {
-		fmt.Println("End-to-end encryption key:")
+		fmt.Println("End-to-end encryption key (next two lines):")
 		fmt.Println(endToEndSymKey)
 	}
-	endToEndHmacKey := getValue(db, "endtoendhmackey", "", verbose)
+	endToEndHmacKey := getValue(db, "endtoendhmackey", "")
 	if endToEndHmacKey != "" {
 		fmt.Println(endToEndHmacKey)
 	}
-
 }
 
 func generateAESKey() ([]byte, error) {
@@ -1193,7 +1090,10 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, verbose bool) {
 							fmt.Println(errmsg)
 						}
 					case "syncpoints":
-						server := getValue(db, "server", "", verbose)
+						server := getValue(db, "server", "")
+						if verbose {
+							fmt.Println("server =", server)
+						}
 						errmsg := rpcListSyncPoints(wnet, server)
 						if errmsg != "" {
 							fmt.Println(errmsg)
@@ -1243,7 +1143,7 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, verbose bool) {
 						if verbose {
 							fmt.Println("The email you entered is:", email)
 						}
-						password, errmsg, err := rpcAddUser(wnet, email, roleSyncPointUser)
+						password, errmsg, err := rpcAddUser(wnet, email, samecommon.RoleSyncPointUser)
 						if err != nil {
 							fmt.Println(err)
 							return
@@ -1258,8 +1158,20 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, verbose bool) {
 							fmt.Println(password)
 							yes := getYesNo(keyboard, "Set as email and password for this client? (y/n) ")
 							if yes {
-								setNameValuePair(db, "email", email, verbose, false)
-								setNameValuePair(db, "password", password, verbose, false)
+								err = samecommon.SetNameValuePair(db, "email", email)
+								if err != nil {
+									// ponkyponk
+								}
+								if verbose {
+									fmt.Println("email set to", email)
+								}
+								samecommon.SetNameValuePair(db, "password", password)
+								if err != nil {
+									// ponkyponk
+								}
+								if verbose {
+									fmt.Println("password set to", password)
+								}
 							}
 						}
 					case "syncpoint":
@@ -1280,7 +1192,13 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, verbose bool) {
 							fmt.Println(publicid)
 							yes := getYesNo(keyboard, "Set key as sync point for this client? (y/n) ")
 							if yes {
-								setNameValuePair(db, "syncpointid", publicid, verbose, false)
+								samecommon.SetNameValuePair(db, "syncpointid", publicid)
+								if err != nil {
+									// ponkyponk
+								}
+								if verbose {
+									fmt.Println("syncpointid set to", publicid)
+								}
 							}
 						}
 					case "grant":
@@ -1297,11 +1215,11 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, verbose bool) {
 						access := 0
 						yes := getYesNo(keyboard, "Grant read access? (y/n) ")
 						if yes {
-							access |= accessRead
+							access |= samecommon.AccessRead
 						}
 						yes = getYesNo(keyboard, "Grant write access? (y/n) ")
 						if yes {
-							access |= accessWrite
+							access |= samecommon.AccessWrite
 						}
 						errmsg, err := rpcAddGrant(wnet, email, syncpublicid, access)
 						if err != nil {
@@ -1413,11 +1331,20 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, verbose bool) {
 								}
 								fmt.Println("New password:")
 								fmt.Println(password)
-								localEmail := getValue(db, "email", "", verbose)
+								localEmail := getValue(db, "email", "")
+								if verbose {
+									fmt.Println("email =", localEmail)
+								}
 								if email == localEmail {
 									yes := getYesNo(keyboard, "Set as password for this client? (y/n) ")
 									if yes {
-										setNameValuePair(db, "password", password, verbose, false)
+										samecommon.SetNameValuePair(db, "password", password)
+										if err != nil {
+											// ponkyponk
+										}
+										if verbose {
+											fmt.Println("password set to", password)
+										}
 									}
 								}
 							default:
@@ -1500,11 +1427,11 @@ func calcTimeFromNow(someTime int64) string {
 // when we get a tree, we initially set the hash to empty string
 // we don't go ahead and compute the hashes because we only compute hashes if the file size or date has changed
 // as an optimization
-func getDirectoryTree(verbose bool, path string, result []wfileInfo, skipIfPermissionDenied bool) ([]wfileInfo, error) {
+func getDirectoryTree(verbose bool, path string, result []samecommon.SameFileInfo, skipIfPermissionDenied bool) ([]samecommon.SameFileInfo, error) {
 	if verbose {
 		fmt.Println("Scanning: " + path)
 	}
-	dir, err := os.Open(makePathSeparatorsForThisOS(path))
+	dir, err := os.Open(samecommon.MakePathSeparatorsForThisOS(path))
 	if err != nil {
 		if skipIfPermissionDenied {
 			if isSkippableErrorMessage(err.Error()) {
@@ -1533,35 +1460,35 @@ func getDirectoryTree(verbose bool, path string, result []wfileInfo, skipIfPermi
 				if verbose {
 					fmt.Println(completePath, "size", filestuff.Size(), "bytes, last modified", calcTimeFromNow(filestuff.ModTime().UnixNano()), "seconds ago")
 				}
-				result = append(result, wfileInfo{completePath, filestuff.Size(), filestuff.ModTime().UnixNano(), "", false})
+				result = append(result, samecommon.SameFileInfo{completePath, filestuff.Size(), filestuff.ModTime().UnixNano(), "", false})
 			}
 		}
 	}
 	return result, nil
 }
 
-func (ptr *wfileSortSlice) Len() int {
+func (ptr *fileSortSlice) Len() int {
 	return len(ptr.theSlice)
 }
 
-func (ptr *wfileSortSlice) Less(i, j int) bool {
-	return ptr.theSlice[i].filePath < ptr.theSlice[j].filePath
+func (ptr *fileSortSlice) Less(i, j int) bool {
+	return ptr.theSlice[i].FilePath < ptr.theSlice[j].FilePath
 }
 
-func (ptr *wfileSortSlice) Swap(i, j int) {
-	filePath := ptr.theSlice[i].filePath
-	ptr.theSlice[i].filePath = ptr.theSlice[j].filePath
-	ptr.theSlice[j].filePath = filePath
-	fileSize := ptr.theSlice[i].fileSize
-	ptr.theSlice[i].fileSize = ptr.theSlice[j].fileSize
-	ptr.theSlice[j].fileSize = fileSize
-	fileTime := ptr.theSlice[i].fileTime
-	ptr.theSlice[i].fileTime = ptr.theSlice[j].fileTime
-	ptr.theSlice[j].fileTime = fileTime
+func (ptr *fileSortSlice) Swap(i, j int) {
+	filePath := ptr.theSlice[i].FilePath
+	ptr.theSlice[i].FilePath = ptr.theSlice[j].FilePath
+	ptr.theSlice[j].FilePath = filePath
+	fileSize := ptr.theSlice[i].FileSize
+	ptr.theSlice[i].FileSize = ptr.theSlice[j].FileSize
+	ptr.theSlice[j].FileSize = fileSize
+	fileTime := ptr.theSlice[i].FileTime
+	ptr.theSlice[i].FileTime = ptr.theSlice[j].FileTime
+	ptr.theSlice[j].FileTime = fileTime
 }
 
 func calcHash(filePath string) string {
-	fileHandle, err := os.Open(makePathSeparatorsForThisOS(filePath))
+	fileHandle, err := os.Open(samecommon.MakePathSeparatorsForThisOS(filePath))
 	checkError(err)
 	defer fileHandle.Close()
 	hash := sha256.New()
@@ -1571,7 +1498,7 @@ func calcHash(filePath string) string {
 	return encoded
 }
 
-func putTreeInTableAndFillInHashesThatNeedToBeUpdated(verbose bool, db *sql.DB, tree []wfileInfo, basePath string, deleteUnused bool) {
+func putTreeInTableAndFillInHashesThatNeedToBeUpdated(verbose bool, db *sql.DB, tree []samecommon.SameFileInfo, basePath string, deleteUnused bool) {
 	var deleteMap map[int64]bool
 	deleteMap = make(map[int64]bool)
 
@@ -1612,12 +1539,12 @@ func putTreeInTableAndFillInHashesThatNeedToBeUpdated(verbose bool, db *sql.DB, 
 	var oldFileHash string
 	ltr := len(tree)
 	for ii := 0; ii < ltr; ii++ {
-		filterOutCheck := tree[ii].filePath[chopOff+1:]
+		filterOutCheck := tree[ii].FilePath[chopOff+1:]
 		if (filterOutCheck != databaseFileName) && (filterOutCheck != tempFileName) {
 			if verbose {
-				fmt.Print(tree[ii].filePath[chopOff:])
+				fmt.Print(tree[ii].FilePath[chopOff:])
 			}
-			rowsCheck, err := stmtSelCheck.Query(tree[ii].filePath[chopOff:])
+			rowsCheck, err := stmtSelCheck.Query(tree[ii].FilePath[chopOff:])
 			checkError(err)
 			defer rowsCheck.Close()
 			var fileid int64
@@ -1626,27 +1553,27 @@ func putTreeInTableAndFillInHashesThatNeedToBeUpdated(verbose bool, db *sql.DB, 
 				rowsCheck.Scan(&fileid, &filesize, &filetime, &oldFileHash)
 			}
 			if fileid == 0 {
-				fileHash := calcHash(tree[ii].filePath)
+				fileHash := calcHash(tree[ii].FilePath)
 				if verbose {
 					fmt.Println(" - NEW, original hash is:", fileHash)
 				}
-				tree[ii].fileHash = fileHash
-				_, err := stmtIns.Exec(makePathSeparatorsStandard(tree[ii].filePath[chopOff:]), tree[ii].fileSize, tree[ii].fileTime, fileHash)
+				tree[ii].FileHash = fileHash
+				_, err := stmtIns.Exec(samecommon.MakePathSeparatorsStandard(tree[ii].FilePath[chopOff:]), tree[ii].FileSize, tree[ii].FileTime, fileHash)
 				checkError(err)
 			} else {
-				if (filesize == tree[ii].fileSize) && (filetime == tree[ii].fileTime) && (oldFileHash != "deleted") {
+				if (filesize == tree[ii].FileSize) && (filetime == tree[ii].FileTime) && (oldFileHash != "deleted") {
 					// assume hasn't changed -- leave alone!
 					if verbose {
 						fmt.Println(" - Has not changed")
 					}
-					tree[ii].fileHash = oldFileHash
+					tree[ii].FileHash = oldFileHash
 				} else {
-					fileHash := calcHash(tree[ii].filePath)
+					fileHash := calcHash(tree[ii].FilePath)
 					if verbose {
 						fmt.Println(" - CHANGED, new hash:", fileHash)
 					}
-					tree[ii].fileHash = fileHash
-					_, err := stmtUpd.Exec(tree[ii].fileSize, tree[ii].fileTime, fileHash, fileid)
+					tree[ii].FileHash = fileHash
+					_, err := stmtUpd.Exec(tree[ii].FileSize, tree[ii].FileTime, fileHash, fileid)
 					checkError(err)
 				}
 				delete(deleteMap, fileid)
@@ -1665,11 +1592,11 @@ func putTreeInTableAndFillInHashesThatNeedToBeUpdated(verbose bool, db *sql.DB, 
 	checkError(err)
 }
 
-func retrieveTreeFromDB(verbose bool, db *sql.DB) []wfileInfo {
+func retrieveTreeFromDB(verbose bool, db *sql.DB) []samecommon.SameFileInfo {
 	tx, err := db.Begin()
 	checkError(err)
 
-	result := make([]wfileInfo, 0)
+	result := make([]samecommon.SameFileInfo, 0)
 
 	cmd := "SELECT fileid, filepath, filesize, filetime, filehash FROM fileinfo WHERE 1 ORDER BY filepath;"
 	stmtSel, err := tx.Prepare(cmd)
@@ -1686,7 +1613,7 @@ func retrieveTreeFromDB(verbose bool, db *sql.DB) []wfileInfo {
 	var filehash string
 	for rows.Next() {
 		rows.Scan(&fileid, &filepath, &filesize, &filetime, &filehash)
-		result = append(result, wfileInfo{filepath, filesize, filetime, filehash, false})
+		result = append(result, samecommon.SameFileInfo{filepath, filesize, filetime, filehash, false})
 	}
 
 	err = tx.Commit()
@@ -1695,7 +1622,7 @@ func retrieveTreeFromDB(verbose bool, db *sql.DB) []wfileInfo {
 	return result
 }
 
-func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpublicid string, localPath string, localTree []wfileInfo, remotePath string, remoteTree []wfileInfo, serverTimeOffset int64) {
+func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpublicid string, localPath string, localTree []samecommon.SameFileInfo, remotePath string, remoteTree []samecommon.SameFileInfo, serverTimeOffset int64) {
 	filterDatabaseFile := "/" + databaseFileName
 	filterTempFile := "/" + tempFileName
 	localIdx := 0
@@ -1712,12 +1639,12 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 			toDownloadRemote = remoteIdx
 			remoteIdx++
 		} else {
-			localCompare := localTree[localIdx].filePath
+			localCompare := localTree[localIdx].FilePath
 			if remoteIdx == len(remoteTree) {
 				if verbose {
 					fmt.Println("Off end of remote tree")
 				}
-				if localTree[localIdx].fileHash == "deleted" {
+				if localTree[localIdx].FileHash == "deleted" {
 					if verbose {
 						fmt.Println("Local file is deleted, no remote file to delete so we do nothing.")
 					}
@@ -1729,7 +1656,7 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 				}
 				localIdx++
 			} else {
-				remoteCompare := remoteTree[remoteIdx].filePath
+				remoteCompare := remoteTree[remoteIdx].FilePath
 				if verbose {
 					fmt.Println("Comparing", localCompare, "with", remoteCompare)
 				}
@@ -1737,15 +1664,15 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 					if verbose {
 						fmt.Println("File names are the same -- comparing file hashes.")
 					}
-					if localTree[localIdx].fileHash != remoteTree[remoteIdx].fileHash {
+					if localTree[localIdx].FileHash != remoteTree[remoteIdx].FileHash {
 						if verbose {
 							fmt.Println("File hashes are different -- determining which is newer.")
-							fmt.Println(" Local file time is:", localTree[localIdx].fileTime)
-							fmt.Println("Remote file time is:", remoteTree[remoteIdx].fileTime)
+							fmt.Println(" Local file time is:", localTree[localIdx].FileTime)
+							fmt.Println("Remote file time is:", remoteTree[remoteIdx].FileTime)
 						}
-						if localTree[localIdx].fileTime > remoteTree[remoteIdx].fileTime {
-							if localTree[localIdx].fileHash == "deleted" {
-								if remoteTree[remoteIdx].fileHash == "deleted" {
+						if localTree[localIdx].FileTime > remoteTree[remoteIdx].FileTime {
+							if localTree[localIdx].FileHash == "deleted" {
+								if remoteTree[remoteIdx].FileHash == "deleted" {
 									if verbose {
 										fmt.Println("Local file is newer but local file is deleted but remote file is also deleted, so doing nothing.")
 									}
@@ -1762,8 +1689,8 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 								}
 							}
 						} else {
-							if remoteTree[remoteIdx].fileHash == "deleted" {
-								if localTree[localIdx].fileHash == "deleted" {
+							if remoteTree[remoteIdx].FileHash == "deleted" {
+								if localTree[localIdx].FileHash == "deleted" {
 									if verbose {
 										fmt.Println("Local file is newer but local file is deleted but remote file is also deleted, so doing nothing.")
 										fmt.Println("Remote file is newer and deleted but local file is also deleted, so doing nothing.")
@@ -1785,7 +1712,7 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 						if verbose {
 							fmt.Println("Hashes match.")
 						}
-						if remoteTree[remoteIdx].reupNeeded {
+						if remoteTree[remoteIdx].ReUpNeeded {
 							toUploadLocal = localIdx
 							if verbose {
 								fmt.Println("Reupload needed -- marked to upload")
@@ -1803,7 +1730,7 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 							fmt.Println("File names are different, local is first")
 						}
 
-						if localTree[localIdx].fileHash == "deleted" {
+						if localTree[localIdx].FileHash == "deleted" {
 							if verbose {
 								fmt.Println("Local file is newer and deleted -- no remote file to delete, so doing nothing.")
 							}
@@ -1818,7 +1745,7 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 						if verbose {
 							fmt.Println("File names are different, remote is first")
 						}
-						if remoteTree[remoteIdx].fileHash == "deleted" {
+						if remoteTree[remoteIdx].FileHash == "deleted" {
 							if verbose {
 								fmt.Println("Remote file is newer and deleted -- no corresponding local file, so doing nothing.")
 							}
@@ -1834,10 +1761,10 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 			}
 		}
 		if toUploadLocal >= 0 {
-			if (localTree[toUploadLocal].filePath != filterDatabaseFile) && (localTree[toUploadLocal].filePath != filterTempFile) { // filter out ourselves
-				fmt.Println("Pushing -->", localTree[toUploadLocal].filePath[1:])
-				localfilepath := localPath + localTree[toUploadLocal].filePath
-				filehash := localTree[toUploadLocal].fileHash
+			if (localTree[toUploadLocal].FilePath != filterDatabaseFile) && (localTree[toUploadLocal].FilePath != filterTempFile) { // filter out ourselves
+				fmt.Println("Pushing -->", localTree[toUploadLocal].FilePath[1:])
+				localfilepath := localPath + localTree[toUploadLocal].FilePath
+				filehash := localTree[toUploadLocal].FileHash
 				errmsg := sendFile(wnet, syncpublicid, localPath, localfilepath, filehash, serverTimeOffset)
 				if errmsg != "ReceptionComplete" {
 					fmt.Println(errmsg)
@@ -1845,10 +1772,10 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 			}
 		}
 		if toDownloadRemote >= 0 {
-			if (remoteTree[toDownloadRemote].filePath != filterDatabaseFile) && (remoteTree[toDownloadRemote].filePath != filterTempFile) { // filter out ourselves
-				fmt.Println("Pulling <--", remoteTree[toDownloadRemote].filePath[1:])
-				localfilepath := localPath + remoteTree[toDownloadRemote].filePath
-				filehash := remoteTree[toDownloadRemote].fileHash
+			if (remoteTree[toDownloadRemote].FilePath != filterDatabaseFile) && (remoteTree[toDownloadRemote].FilePath != filterTempFile) { // filter out ourselves
+				fmt.Println("Pulling <--", remoteTree[toDownloadRemote].FilePath[1:])
+				localfilepath := localPath + remoteTree[toDownloadRemote].FilePath
+				filehash := remoteTree[toDownloadRemote].FileHash
 				errmsg := retrieveFile(verbose, db, wnet, syncpublicid, localPath, localfilepath, filehash, serverTimeOffset)
 				if errmsg != "" {
 					if errmsg == "NoExist" {
@@ -1861,10 +1788,10 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 			}
 		}
 		if toDeleteRemote >= 0 {
-			if (remoteTree[toDeleteRemote].filePath != filterDatabaseFile) && (remoteTree[toDeleteRemote].filePath != filterTempFile) { // filter out ourselves
-				fmt.Println("Pushing delete notification: ", remoteTree[toDeleteRemote].filePath[1:])
-				remotefilepath := remoteTree[toDeleteRemote].filePath
-				filehash := remoteTree[toDeleteRemote].fileHash
+			if (remoteTree[toDeleteRemote].FilePath != filterDatabaseFile) && (remoteTree[toDeleteRemote].FilePath != filterTempFile) { // filter out ourselves
+				fmt.Println("Pushing delete notification: ", remoteTree[toDeleteRemote].FilePath[1:])
+				remotefilepath := remoteTree[toDeleteRemote].FilePath
+				filehash := remoteTree[toDeleteRemote].FileHash
 				errmsg, err := rpcMarkFileDeleted(verbose, wnet, syncpublicid, remotefilepath, filehash, serverTimeOffset)
 				if err != nil {
 					fmt.Println(err.Error())
@@ -1877,9 +1804,9 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 			}
 		}
 		if toDeleteLocal >= 0 {
-			if (localTree[toDeleteLocal].filePath != filterDatabaseFile) && (localTree[toDeleteLocal].filePath != filterTempFile) { // filter out ourselves
-				fmt.Println("Deleting: ", localTree[toDeleteLocal].filePath[1:])
-				localfilepath := localPath + makePathSeparatorsForThisOS(localTree[toDeleteLocal].filePath)
+			if (localTree[toDeleteLocal].FilePath != filterDatabaseFile) && (localTree[toDeleteLocal].FilePath != filterTempFile) { // filter out ourselves
+				fmt.Println("Deleting: ", localTree[toDeleteLocal].FilePath[1:])
+				localfilepath := localPath + samecommon.MakePathSeparatorsForThisOS(localTree[toDeleteLocal].FilePath)
 				if verbose {
 					fmt.Println("Deleting local file path:", localfilepath)
 				}
@@ -1889,9 +1816,9 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 	}
 }
 
-func dumpTree(tree []wfileInfo) {
+func dumpTree(tree []samecommon.SameFileInfo) {
 	for _, fileinfo := range tree {
-		fmt.Println(fileinfo.filePath)
+		fmt.Println(fileinfo.FilePath)
 	}
 }
 
@@ -1943,10 +1870,10 @@ func main() {
 			fmt.Println("You cannot create a syncronized directory inside another synchronized directory.")
 			return
 		}
-		localTree := make([]wfileInfo, 0)
+		localTree := make([]samecommon.SameFileInfo, 0)
 		localTree, err = getDirectoryTree(verbose, currentPath, localTree, false)
 		for ii := 0; ii < len(localTree); ii++ {
-			if localTree[ii].filePath[len(localTree[ii].filePath)-len(databaseFileName):] == databaseFileName {
+			if localTree[ii].FilePath[len(localTree[ii].FilePath)-len(databaseFileName):] == databaseFileName {
 				fmt.Println("You cannot create a syncronized directory with another synchronized directory inside it.")
 				return
 			}
@@ -1980,13 +1907,25 @@ func main() {
 			fmt.Println(err)
 			return
 		}
-		setNameValuePair(db, "serversymkey", hex.EncodeToString(symkey), verbose, false)
-		setNameValuePair(db, "serverhmackey", hex.EncodeToString(hmackey), verbose, false)
+		samecommon.SetNameValuePair(db, "serversymkey", hex.EncodeToString(symkey))
+		if err != nil {
+			// ponkyponk
+		}
+		if verbose {
+			fmt.Println("serversymkey set to", hex.EncodeToString(symkey))
+		}
+		samecommon.SetNameValuePair(db, "serverhmackey", hex.EncodeToString(hmackey))
+		if err != nil {
+			// ponkyponk
+		}
+		if verbose {
+			fmt.Println("serverhmackey set to", hex.EncodeToString(hmackey))
+		}
 		return
 	}
 	if showServerKeys {
-		symmetricKeyStr := getValue(db, "serversymkey", "", verbose)
-		hmacKeyStr := getValue(db, "serverhmackey", "", verbose)
+		symmetricKeyStr := getValue(db, "serversymkey", "")
+		hmacKeyStr := getValue(db, "serverhmackey", "")
 		fmt.Println(symmetricKeyStr)
 		fmt.Println(hmacKeyStr)
 		return
@@ -1999,7 +1938,13 @@ func main() {
 		server := getLine(keyboard)
 		// fmt.Scanln(&server)
 		if server != "" {
-			setNameValuePair(db, "server", server, verbose, false)
+			samecommon.SetNameValuePair(db, "server", server)
+			if err != nil {
+				// ponkyponk
+			}
+			if verbose {
+				fmt.Println("server set to", server)
+			}
 		}
 		port := 0
 		fmt.Print("Port: ")
@@ -2008,26 +1953,50 @@ func main() {
 		if ptStr != "" {
 			port = strToInt(ptStr)
 			if port != 0 {
-				setNameValuePair(db, "port", intToStr(port), verbose, false)
+				samecommon.SetNameValuePair(db, "port", intToStr(port))
+				if err != nil {
+					// ponkyponk
+				}
+				if verbose {
+					fmt.Println("port set to", intToStr(port))
+				}
 			}
 		}
 		fmt.Print("Email: ")
 		email := getLine(keyboard)
 		// fmt.Scanln(&email)
 		if email != "" {
-			setNameValuePair(db, "email", email, verbose, false)
+			samecommon.SetNameValuePair(db, "email", email)
+			if err != nil {
+				// ponkyponk
+			}
+			if verbose {
+				fmt.Println("email set to", email)
+			}
 		}
 		fmt.Print("Password: ")
 		password := getLine(keyboard)
 		// fmt.Scanln(&password)
 		if password != "" {
-			setNameValuePair(db, "password", password, verbose, false)
+			samecommon.SetNameValuePair(db, "password", password)
+			if err != nil {
+				// ponkyponk
+			}
+			if verbose {
+				fmt.Println("password set to", password)
+			}
 		}
 		fmt.Print("Sync point ID: ")
 		syncPointID := getLine(keyboard)
 		// fmt.Scanln(&syncPointID)
 		if syncPointID != "" {
-			setNameValuePair(db, "syncpointid", syncPointID, verbose, false)
+			samecommon.SetNameValuePair(db, "syncpointid", syncPointID)
+			if err != nil {
+				// ponkyponk
+			}
+			if verbose {
+				fmt.Println("syncpointid", syncPointID)
+			}
 		}
 		return
 	}
@@ -2042,8 +2011,20 @@ func main() {
 		endToEndHmacBin, err := generateAESKey()
 		checkError(err)
 		endToEndHmacKey := hex.EncodeToString(endToEndHmacBin)
-		setNameValuePair(db, "endtoendsymkey", endToEndSymKey, verbose, false)
-		setNameValuePair(db, "endtoendhmackey", endToEndHmacKey, verbose, false)
+		samecommon.SetNameValuePair(db, "endtoendsymkey", endToEndSymKey)
+		if err != nil {
+			// ponkyponk
+		}
+		if verbose {
+			fmt.Println("endtoendsymkey set to", endToEndSymKey)
+		}
+		samecommon.SetNameValuePair(db, "endtoendhmackey", endToEndHmacKey)
+		if err != nil {
+			// ponkyponk
+		}
+		if verbose {
+			fmt.Println("endtoendhmackey set to", endToEndHmacKey)
+		}
 		fmt.Println(endToEndSymKey)
 		fmt.Println(endToEndHmacKey)
 		return
@@ -2063,13 +2044,25 @@ func main() {
 			fmt.Println(err)
 			return
 		}
-		setNameValuePair(db, "endtoendsymkey", hex.EncodeToString(endToEndSymKey), verbose, false)
-		setNameValuePair(db, "endtoendhmackey", hex.EncodeToString(endToEndHmacKey), verbose, false)
+		samecommon.SetNameValuePair(db, "endtoendsymkey", hex.EncodeToString(endToEndSymKey))
+		if err != nil {
+			// ponkyponk
+		}
+		if verbose {
+			fmt.Println("endtoendsymkey set to", hex.EncodeToString(endToEndSymKey))
+		}
+		samecommon.SetNameValuePair(db, "endtoendhmackey", hex.EncodeToString(endToEndHmacKey))
+		if err != nil {
+			// ponkyponk
+		}
+		if verbose {
+			fmt.Println("endtoendhmackey set to", hex.EncodeToString(endToEndHmacKey))
+		}
 		return
 	}
 	if showEndToEndKeys {
-		endToEndSymKeyStr := getValue(db, "endtoendsymkey", "", verbose)
-		endToEndHmacKeyStr := getValue(db, "endtoendhmackey", "", verbose)
+		endToEndSymKeyStr := getValue(db, "endtoendsymkey", "")
+		endToEndHmacKeyStr := getValue(db, "endtoendhmackey", "")
 		fmt.Println(endToEndSymKeyStr)
 		fmt.Println(endToEndHmacKeyStr)
 		return
@@ -2078,32 +2071,32 @@ func main() {
 	// ok, if we got here, we're not doing configuration! We're
 	// transferring files!!
 	// Brrrp! Unless we're going into Admin Mode
-	server := getValue(db, "server", "", verbose)
+	server := getValue(db, "server", "")
 	if verbose {
 		fmt.Println("Server:", server)
 	}
-	ptStr := getValue(db, "port", "0", verbose)
+	ptStr := getValue(db, "port", "0")
 	port := strToInt(ptStr)
 	if verbose {
 		fmt.Println("Port:", port)
 	}
-	email := getValue(db, "email", "", verbose)
+	email := getValue(db, "email", "")
 	if verbose {
 		fmt.Println("Email:", email)
 	}
-	password := getValue(db, "password", "", false)
+	password := getValue(db, "password", "")
 	if verbose {
 		fmt.Println("Password:", password)
 	}
-	syncPointID := getValue(db, "syncpointid", "", verbose)
+	syncPointID := getValue(db, "syncpointid", "")
 	if verbose {
 		fmt.Println("Sync point ID:", syncPointID)
 	}
-	endToEndSymKey := getValue(db, "endtoendsymkey", "", verbose)
+	endToEndSymKey := getValue(db, "endtoendsymkey", "")
 	if verbose {
 		fmt.Println("End-to-end symmetric key:", endToEndSymKey)
 	}
-	endToEndHmacKey := getValue(db, "endtoendhmackey", "", verbose)
+	endToEndHmacKey := getValue(db, "endtoendhmackey", "")
 	if verbose {
 		fmt.Println("End-to-end keyed-hash message authentication code key:", endToEndHmacKey)
 	}
@@ -2113,13 +2106,13 @@ func main() {
 		fmt.Println("Use same -l to list current configuration.")
 		return
 	}
-	serverSymKeyStr := getValue(db, "serversymkey", "", verbose)
+	serverSymKeyStr := getValue(db, "serversymkey", "")
 	serverSymKey, err := hex.DecodeString(serverSymKeyStr)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	serverHmacKeyStr := getValue(db, "serverhmackey", "", verbose)
+	serverHmacKeyStr := getValue(db, "serverhmackey", "")
 	serverHmacKey, err := hex.DecodeString(serverHmacKeyStr)
 	if err != nil {
 		fmt.Println(err)
@@ -2171,8 +2164,8 @@ func main() {
 		fmt.Println("Scanning local disk")
 	}
 	// Ok, now that we're logged in, let's scan the local disk and ask the remote server to tell us what it has
-	var sortSlice wfileSortSlice
-	localTree := make([]wfileInfo, 0)
+	var sortSlice fileSortSlice
+	localTree := make([]samecommon.SameFileInfo, 0)
 	path := rootPath
 	if verbose {
 		fmt.Println("Scanning local tree.")
