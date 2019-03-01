@@ -751,9 +751,6 @@ func addSyncPoint(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, path stri
 	if len(path) == 0 {
 		return "", errors.New("No path specified.")
 	}
-	if path[0] != os.PathSeparator {
-		return "", errors.New("Must be an absolute path.")
-	}
 	dirEmpty, err := isDirEmpty(path, verbose)
 	if err != nil {
 		return "", err
@@ -2049,7 +2046,7 @@ func main() {
 	showKeys := *kflag
 	createAdmin := *aflag
 	if verbose {
-		fmt.Println("samed version 0.3.4")
+		fmt.Println("samed version 0.3.7")
 		fmt.Println("Flags:")
 		fmt.Println("    Generate key mode:", onOff(generateKeys))
 		fmt.Println("    Initialize:", onOff(initialize))
