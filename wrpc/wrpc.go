@@ -585,7 +585,7 @@ func (self *WNetConnection) NextMessage() ([]byte, error) {
 }
 
 func (self *WNetConnection) ShoveBytes(plaintext []byte, ciphertext []byte) error {
-	// This function shoves naked bytes into the connection
+	// This function shoves bytes into the connection.
 	// Used for file transfers where the file can be of unlimited size
 	// and we don't want chunks of our file wrapped in messages with
 	// initialization vectors and signature checks.
@@ -725,7 +725,7 @@ func (self *XWRPC) AddRowColumnInt(param int64) error {
 	if self.tables[tblNum].columns[lc].colType != ColInt {
 		return errors.New("Incorrect type for column. Expected type " + NameOfColType(self.tables[tblNum].columns[lc].colType) + " for column " + `"` + self.tables[tblNum].columns[lc].name + `"` + " but actually got " + NameOfColType(ColInt))
 	}
-	// we add ints "naked" to save bytes
+	// we add ints without enclosing in a block to save bytes
 	self.tables[tblNum].rows[rowNum] = append(self.tables[tblNum].rows[rowNum], EncodeInt(param))
 	return nil
 }
@@ -740,7 +740,7 @@ func (self *XWRPC) AddRowColumnUint(param uint64) error {
 	if self.tables[tblNum].columns[lc].colType != ColUint {
 		return errors.New("Incorrect type for column. Expected type " + NameOfColType(self.tables[tblNum].columns[lc].colType) + " for column " + `"` + self.tables[tblNum].columns[lc].name + `"` + " but actually got " + NameOfColType(ColUint))
 	}
-	// we add ints "naked" to save bytes
+	// we add ints without enclosing in a block to save bytes
 	self.tables[tblNum].rows[rowNum] = append(self.tables[tblNum].rows[rowNum], EncodeUint(param))
 	return nil
 }
@@ -755,7 +755,7 @@ func (self *XWRPC) AddRowColumnBool(param bool) error {
 	if self.tables[tblNum].columns[lc].colType != ColBool {
 		return errors.New("Incorrect type for column. Expected type " + NameOfColType(self.tables[tblNum].columns[lc].colType) + " for column " + `"` + self.tables[tblNum].columns[lc].name + `"` + " but actually got " + NameOfColType(ColBool))
 	}
-	// we add ints "naked" to save bytes
+	// we add ints without enclosing in a block to save bytes
 	var uiParam uint64
 	if param {
 		uiParam = 1
@@ -875,7 +875,7 @@ func (self *XWRPC) UnmarshallDB() error {
 		case 'T':
 			position++
 			tablename, position = getBlockString(self.message, position)
-			// int and uint are sent "naked" to save bytes
+			// int and uint are sent without enclosing in a block to save bytes
 
 			numBytes := int(self.message[position])
 			intBytes := self.message[position : position+numBytes+1]
@@ -901,7 +901,7 @@ func (self *XWRPC) UnmarshallDB() error {
 					if position >= len(self.message) {
 						return errors.New("Off end of message. Message was malformed on the sending end.")
 					}
-					// int and uint are sent "naked" to save bytes
+					// int and uint are sent without enclosing in a block to save bytes
 					switch self.tables[tblNum].columns[colNum].colType {
 					case ColInt:
 						intNumBytes := int(self.message[position])
