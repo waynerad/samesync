@@ -144,16 +144,76 @@ func rpcGetTime(wnet wrpc.IWNetConnection) (int64, error) {
 	return result, errors.New(errmsg)
 }
 
-func rpcLogin(wnet wrpc.IWNetConnection, email string, password string) (string, error) {
+func rpcLogin(wnet wrpc.IWNetConnection, username string, password string) (string, error) {
+	fmt.Println("debug rpcLogin")
+	fmt.Println("debug     username", username)
+	fmt.Println("debug     password", password)
 	rpc := wrpc.NewDB()
 	rpc.StartDB("Login", 0, 1)
-	rpc.StartTable("", 2, 1)
-	rpc.AddColumn("", wrpc.ColString)
+	rpc.StartTable("", 1, 1)
 	rpc.AddColumn("", wrpc.ColString)
 	rpc.StartRow()
-	rpc.AddRowColumnString(email)
-	rpc.AddRowColumnString(password)
+	rpc.AddRowColumnString(username)
 	err := rpc.SendDB(wnet)
+	if err != nil {
+		return "", err
+	}
+	rplmsg, err := wnet.NextMessage()
+	if len(rplmsg) == 0 {
+		// if message is empty, we assume the server closed the connection.
+		wnet.Close()
+		panic("Connection closed by same server.")
+	}
+	reply := wrpc.NewDB()
+	reply.ReceiveDB(rplmsg)
+	if reply.GetDBName() == "LoginReply" {
+		// if we're here, and didn't get the challenge, it must be
+		// because the login has failed already
+		errmsg, err := reply.GetString(0, 0, 0)
+		if err != nil {
+			return "", err
+		}
+		return errmsg, nil
+	}
+	if reply.GetDBName() != "Challenge" {
+		errmsg, err := reply.GetString(0, 0, 0)
+		if err != nil {
+			panic(err)
+		}
+		panic(errors.New(reply.GetDBName() + ": " + errmsg))
+	}
+	saltBin, err := reply.GetByteArray(0, 0, 0)
+	if err != nil {
+		panic(err)
+	}
+	challengeBin, err := reply.GetByteArray(0, 0, 1)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("debug     Challenge received")
+	fmt.Println("debug     Salt:", hex.EncodeToString(saltBin))
+	fmt.Println("debug     Challenge", hex.EncodeToString(challengeBin))
+	// We use our password and their salt to reproduce the password hash
+	// they they have on their end
+	theirHash := samecommon.CalculatePwHash(saltBin, password)
+	// Now with that, we use it with their challenge to formulate our
+	// response.
+	combo := append(theirHash, challengeBin...)
+	sum := sha256.Sum256(combo)
+	response := make([]byte, 32)
+	// copy(response,sum) -- gives error second argument to copy should be slice or string; have [32]byte
+	for ii := 0; ii < 32; ii++ {
+		response[ii] = sum[ii]
+	}
+	fmt.Println("debug     Response", hex.EncodeToString(response))
+	// send response back
+	rpc = wrpc.NewDB()
+	rpc.StartDB("Response", 0, 1)
+	rpc.StartTable("", 1, 1)
+	rpc.AddColumn("", wrpc.ColByteArray)
+	rpc.StartRow()
+	rpc.AddRowColumnByteArray(response)
+	err = rpc.SendDB(wnet)
 	if err != nil {
 		return "", err
 	}
@@ -174,7 +234,7 @@ func rpcListUsers(wnet wrpc.IWNetConnection) string {
 	}
 	num := reply.GetNumRows(0)
 	for ii := 0; ii < num; ii++ {
-		email, err := reply.GetString(0, ii, 0)
+		username, err := reply.GetString(0, ii, 0)
 		if err != nil {
 			return err.Error()
 		}
@@ -183,7 +243,7 @@ func rpcListUsers(wnet wrpc.IWNetConnection) string {
 			return err.Error()
 		}
 		role := int(role64)
-		fmt.Println(email, "-", samecommon.RoleFlagsToString(role))
+		fmt.Println(username, "-", samecommon.RoleFlagsToString(role))
 	}
 	errmsg, err := reply.GetString(1, 0, 0)
 	if err != nil {
@@ -192,14 +252,14 @@ func rpcListUsers(wnet wrpc.IWNetConnection) string {
 	return errmsg
 }
 
-func rpcAddUser(wnet wrpc.IWNetConnection, email string, role int) (string, string, error) {
+func rpcAddUser(wnet wrpc.IWNetConnection, username string, role int) (string, string, error) {
 	rpc := wrpc.NewDB()
 	rpc.StartDB("AddUser", 0, 1)
 	rpc.StartTable("", 2, 1)
 	rpc.AddColumn("", wrpc.ColString)
 	rpc.AddColumn("", wrpc.ColInt)
 	rpc.StartRow()
-	rpc.AddRowColumnString(email)
+	rpc.AddRowColumnString(username)
 	rpc.AddRowColumnInt(int64(role))
 	err := rpc.SendDB(wnet)
 	if err != nil {
@@ -279,7 +339,7 @@ func rpcListSyncPoints(wnet wrpc.IWNetConnection, server string) string {
 	return errmsg
 }
 
-func rpcAddGrant(wnet wrpc.IWNetConnection, email string, syncpublicid string, access int) (string, error) {
+func rpcAddGrant(wnet wrpc.IWNetConnection, username string, syncpublicid string, access int) (string, error) {
 	rpc := wrpc.NewDB()
 	rpc.StartDB("AddGrant", 0, 1)
 	rpc.StartTable("", 0, 0)
@@ -287,7 +347,7 @@ func rpcAddGrant(wnet wrpc.IWNetConnection, email string, syncpublicid string, a
 	rpc.AddColumn("", wrpc.ColString)
 	rpc.AddColumn("", wrpc.ColInt)
 	rpc.StartRow()
-	rpc.AddRowColumnString(email)
+	rpc.AddRowColumnString(username)
 	rpc.AddRowColumnString(syncpublicid)
 	rpc.AddRowColumnInt(int64(access))
 	err := rpc.SendDB(wnet)
@@ -311,7 +371,7 @@ func rpcListGrants(wnet wrpc.IWNetConnection) string {
 	}
 	num := reply.GetNumRows(0)
 	for ii := 0; ii < num; ii++ {
-		email, err := reply.GetString(0, ii, 0)
+		username, err := reply.GetString(0, ii, 0)
 		if err != nil {
 			return err.Error()
 		}
@@ -324,7 +384,7 @@ func rpcListGrants(wnet wrpc.IWNetConnection) string {
 			return err.Error()
 		}
 		access := int(access64)
-		fmt.Println(email, "-> has access to sync point ->", publicid, "-> with permissions:", samecommon.AccessFlagsToString(access))
+		fmt.Println(username, "-> has access to sync point ->", publicid, "-> with permissions:", samecommon.AccessFlagsToString(access))
 	}
 	errmsg, err := reply.GetString(1, 0, 0)
 	if err != nil {
@@ -333,13 +393,13 @@ func rpcListGrants(wnet wrpc.IWNetConnection) string {
 	return errmsg
 }
 
-func rpcDeleteUser(wnet wrpc.IWNetConnection, email string) (string, error) {
+func rpcDeleteUser(wnet wrpc.IWNetConnection, username string) (string, error) {
 	rpc := wrpc.NewDB()
 	rpc.StartDB("DeleteUser", 0, 1)
 	rpc.StartTable("", 1, 1)
 	rpc.AddColumn("", wrpc.ColString)
 	rpc.StartRow()
-	rpc.AddRowColumnString(email)
+	rpc.AddRowColumnString(username)
 	err := rpc.SendDB(wnet)
 	if err != nil {
 		return "", err
@@ -363,14 +423,14 @@ func rpcDeleteSyncPoint(wnet wrpc.IWNetConnection, path string) (string, error) 
 	return errmsg, err
 }
 
-func rpcDeleteGrant(wnet wrpc.IWNetConnection, email string, syncpublicid string) (string, error) {
+func rpcDeleteGrant(wnet wrpc.IWNetConnection, username string, syncpublicid string) (string, error) {
 	rpc := wrpc.NewDB()
 	rpc.StartDB("DeleteGrant", 0, 1)
 	rpc.StartTable("", 2, 1)
 	rpc.AddColumn("", wrpc.ColString)
 	rpc.AddColumn("", wrpc.ColString)
 	rpc.StartRow()
-	rpc.AddRowColumnString(email)
+	rpc.AddRowColumnString(username)
 	rpc.AddRowColumnString(syncpublicid)
 	err := rpc.SendDB(wnet)
 	if err != nil {
@@ -759,13 +819,13 @@ func rpcMarkFileDeleted(verbose bool, wnet wrpc.IWNetConnection, syncpublicid st
 	return errmsg, err
 }
 
-func rpcResetUserPassword(wnet wrpc.IWNetConnection, email string) (string, string, error) {
+func rpcResetUserPassword(wnet wrpc.IWNetConnection, username string) (string, string, error) {
 	rpc := wrpc.NewDB()
 	rpc.StartDB("ResetUserPassword", 0, 1)
 	rpc.StartTable("", 1, 1)
 	rpc.AddColumn("", wrpc.ColString)
 	rpc.StartRow()
-	rpc.AddRowColumnString(email)
+	rpc.AddRowColumnString(username)
 	err := rpc.SendDB(wnet)
 	if err != nil {
 		return "", "", err
@@ -929,12 +989,12 @@ func showConfiguration(db *sql.DB, verbose bool) {
 	server := getValue(db, "server", "")
 	ptStr := getValue(db, "port", "0")
 	port := strToInt(ptStr)
-	email := getValue(db, "email", "")
+	username := getValue(db, "username", "")
 	password := getValue(db, "password", "")
 	syncPointID := getValue(db, "syncpointid", "")
 	fmt.Println("Server:", server)
 	fmt.Println("Port:", port)
-	fmt.Println("Email:", email)
+	fmt.Println("Username (email):", username)
 	fmt.Println("Password:", password)
 	fmt.Println("Sync point ID:", syncPointID)
 
@@ -1088,12 +1148,12 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, verbose bool) {
 				} else {
 					switch params[1] {
 					case "user":
-						fmt.Print("Email: ")
-						email := getLine(keyboard)
+						fmt.Print("Username (email): ")
+						username := getLine(keyboard)
 						if verbose {
-							fmt.Println("The email you entered is:", email)
+							fmt.Println("The username you entered is:", username)
 						}
-						password, errmsg, err := rpcAddUser(wnet, email, samecommon.RoleSyncPointUser)
+						password, errmsg, err := rpcAddUser(wnet, username, samecommon.RoleSyncPointUser)
 						if err != nil {
 							fmt.Println(err)
 							return
@@ -1106,15 +1166,15 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, verbose bool) {
 						} else {
 							fmt.Println("User created. Password is:")
 							fmt.Println(password)
-							yes := getYesNo(keyboard, "Set as email and password for this client? (y/n) ")
+							yes := getYesNo(keyboard, "Set as username and password for this client? (y/n) ")
 							if yes {
-								err = samecommon.SetNameValuePair(db, "email", email)
+								err = samecommon.SetNameValuePair(db, "username", username)
 								if err != nil {
 									fmt.Println(err)
 									return
 								}
 								if verbose {
-									fmt.Println("email set to", email)
+									fmt.Println("username set to", username)
 								}
 								samecommon.SetNameValuePair(db, "password", password)
 								if err != nil {
@@ -1155,10 +1215,10 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, verbose bool) {
 							}
 						}
 					case "grant":
-						email := ""
-						for email == "" {
-							fmt.Print("Email: ")
-							email = getLine(keyboard)
+						username := ""
+						for username == "" {
+							fmt.Print("Username (email): ")
+							username = getLine(keyboard)
 						}
 						syncpublicid := ""
 						for syncpublicid == "" {
@@ -1174,7 +1234,7 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, verbose bool) {
 						if yes {
 							access |= samecommon.AccessWrite
 						}
-						errmsg, err := rpcAddGrant(wnet, email, syncpublicid, access)
+						errmsg, err := rpcAddGrant(wnet, username, syncpublicid, access)
 						if err != nil {
 							fmt.Println(err)
 							return
@@ -1196,12 +1256,12 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, verbose bool) {
 				} else {
 					switch params[1] {
 					case "user":
-						fmt.Print("Email: ")
-						email := getLine(keyboard)
+						fmt.Print("Username (email): ")
+						username := getLine(keyboard)
 						if verbose {
-							fmt.Println("The email you entered is:", email)
+							fmt.Println("The username you entered is:", username)
 						}
-						errmsg, err := rpcDeleteUser(wnet, email)
+						errmsg, err := rpcDeleteUser(wnet, username)
 						if err != nil {
 							fmt.Println(err)
 							return
@@ -1233,17 +1293,17 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, verbose bool) {
 							}
 						}
 					case "grant":
-						email := ""
-						for email == "" {
-							fmt.Print("Email: ")
-							email = getLine(keyboard)
+						username := ""
+						for username == "" {
+							fmt.Print("Username (email): ")
+							username = getLine(keyboard)
 						}
 						syncpublicid := ""
 						for syncpublicid == "" {
 							fmt.Print("Sync point ID: ")
 							syncpublicid = getLine(keyboard)
 						}
-						errmsg, err := rpcDeleteGrant(wnet, email, syncpublicid)
+						errmsg, err := rpcDeleteGrant(wnet, username, syncpublicid)
 						if err != nil {
 							fmt.Println(err)
 							return
@@ -1270,11 +1330,11 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, verbose bool) {
 							switch params[2] {
 							case "password":
 								fmt.Print("Email: ")
-								email := getLine(keyboard)
+								username := getLine(keyboard)
 								if verbose {
-									fmt.Println("The email you entered is:", email)
+									fmt.Println("The username you entered is:", username)
 								}
-								password, errmsg, err := rpcResetUserPassword(wnet, email)
+								password, errmsg, err := rpcResetUserPassword(wnet, username)
 								if err != nil {
 									fmt.Println(err)
 									return
@@ -1284,11 +1344,11 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, verbose bool) {
 								}
 								fmt.Println("New password:")
 								fmt.Println(password)
-								localEmail := getValue(db, "email", "")
+								localEmail := getValue(db, "username", "")
 								if verbose {
-									fmt.Println("email =", localEmail)
+									fmt.Println("username =", localEmail)
 								}
-								if email == localEmail {
+								if username == localEmail {
 									yes := getYesNo(keyboard, "Set as password for this client? (y/n) ")
 									if yes {
 										samecommon.SetNameValuePair(db, "password", password)
@@ -1830,7 +1890,7 @@ func main() {
 	showEndToEndKeys := *xflag
 	runForever := *zflag
 	if verbose {
-		fmt.Println("same version 0.3.7")
+		fmt.Println("same version 0.4.0")
 		fmt.Println("Command line flags:")
 		fmt.Println("    Initialize mode:", onOff(initialize))
 		fmt.Println("    Configure mode:", onOff(configure))
@@ -1949,16 +2009,16 @@ func main() {
 			}
 		}
 		fmt.Print("Email: ")
-		email := getLine(keyboard)
-		// fmt.Scanln(&email)
-		if email != "" {
-			samecommon.SetNameValuePair(db, "email", email)
+		username := getLine(keyboard)
+		// fmt.Scanln(&username)
+		if username != "" {
+			samecommon.SetNameValuePair(db, "username", username)
 			if err != nil {
 				fmt.Println(err)
 				return
 			}
 			if verbose {
-				fmt.Println("email set to", email)
+				fmt.Println("username set to", username)
 			}
 		}
 		fmt.Print("Password: ")
@@ -2073,9 +2133,9 @@ func main() {
 	if verbose {
 		fmt.Println("Port:", port)
 	}
-	email := getValue(db, "email", "")
+	username := getValue(db, "username", "")
 	if verbose {
-		fmt.Println("Email:", email)
+		fmt.Println("Email:", username)
 	}
 	password := getValue(db, "password", "")
 	if verbose {
@@ -2093,7 +2153,7 @@ func main() {
 	if verbose {
 		fmt.Println("End-to-end keyed-hash message authentication code key:", endToEndHmacKey)
 	}
-	if (server == "") || (port == 0) || (email == "") || (password == "") || (syncPointID == "") {
+	if (server == "") || (port == 0) || (username == "") || (password == "") || (syncPointID == "") {
 		fmt.Println("Server and sync point information is not set up.")
 		fmt.Println("Use same -c to configure.")
 		fmt.Println("Use same -l to list current configuration.")
@@ -2146,7 +2206,7 @@ func main() {
 			fmt.Println("Difference between server time and local time:", serverTimeOffset, "nanoseconds")
 		}
 		// sendFile("/Users/waynerad/Documents/flushdns.txt", wnet, serverTimeOffset)
-		errmsg, err := rpcLogin(wnet, email, password)
+		errmsg, err := rpcLogin(wnet, username, password)
 		if err != nil {
 			fmt.Println("Login failed:", err)
 		}
@@ -2155,7 +2215,7 @@ func main() {
 			return
 		}
 		if verbose {
-			fmt.Println("Log in as", email, "successful")
+			fmt.Println("Log in as", username, "successful")
 			fmt.Println("Scanning local disk")
 		}
 		// Ok, now that we're logged in, let's scan the local disk and ask the remote server to tell us what it has

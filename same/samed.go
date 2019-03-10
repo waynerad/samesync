@@ -65,18 +65,13 @@ func generatePwSalt() ([]byte, error) {
 	return key, err
 }
 
-func calculatePwHash(pwsalt []byte, password string) []byte {
-	combo := append(pwsalt, []byte(password)...)
-	sum := sha256.Sum256([]byte(combo))
-	result := make([]byte, 32)
-	// copy(result,sum) -- gives error second argument to copy should be slice or string; have [32]byte
-	for ii := 0; ii < 32; ii++ {
-		result[ii] = sum[ii]
-	}
-	return result
+func generateSyncPointId() ([]byte, error) {
+	key := make([]byte, 32)
+	_, err := rand.Read(key)
+	return key, err
 }
 
-func generateSyncPointId() ([]byte, error) {
+func generateChallenge() ([]byte, error) {
 	key := make([]byte, 32)
 	_, err := rand.Read(key)
 	return key, err
@@ -144,7 +139,7 @@ func initializeServerTables(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	cmd = "CREATE TABLE user (userid INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL, pwsalt TEXT NOT NULL, pwhash TEXT NOT NULL, role INTEGER);"
+	cmd = "CREATE TABLE user (userid INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL, pwsalt TEXT NOT NULL, pwhash TEXT NOT NULL, role INTEGER);"
 	stmtCreate, err = tx.Prepare(cmd)
 	if err != nil {
 		return err
@@ -153,7 +148,7 @@ func initializeServerTables(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	cmd = "CREATE INDEX idx_us_em ON user (email);"
+	cmd = "CREATE INDEX idx_us_em ON user (username);"
 	stmtIndex, err = tx.Prepare(cmd)
 	if err != nil {
 		return err
@@ -213,17 +208,17 @@ func initializeServerTables(db *sql.DB) error {
 
 func createTheAdminAccount(db *sql.DB, verbose bool) error {
 	fmt.Println("Creating admin account.")
-	email := "admin"
+	username := "admin"
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
-	cmd := "SELECT userid FROM user WHERE email = ?;"
+	cmd := "SELECT userid FROM user WHERE username = ?;"
 	stmtSelExisting, err := tx.Prepare(cmd)
 	if err != nil {
 		return err
 	}
-	rowsExisting, err := stmtSelExisting.Query(email)
+	rowsExisting, err := stmtSelExisting.Query(username)
 	if err != nil {
 		return err
 	}
@@ -255,16 +250,16 @@ func createTheAdminAccount(db *sql.DB, verbose bool) error {
 		}
 	}
 	pwsalt := hex.EncodeToString(pwSaltBin)
-	pwHashBin := calculatePwHash(pwSaltBin, password)
+	pwHashBin := samecommon.CalculatePwHash(pwSaltBin, password)
 	pwhash := hex.EncodeToString(pwHashBin)
 	role := samecommon.RoleAdmin
 	if userid == 0 {
-		cmd = "INSERT INTO user (email, pwsalt, pwhash, role) VALUES (?, ?, ?, ?);"
+		cmd = "INSERT INTO user (username, pwsalt, pwhash, role) VALUES (?, ?, ?, ?);"
 		stmtIns, err := tx.Prepare(cmd)
 		if err != nil {
 			return err
 		}
-		_, err = stmtIns.Exec(email, pwsalt, pwhash, role)
+		_, err = stmtIns.Exec(username, pwsalt, pwhash, role)
 		if err != nil {
 			return err
 		}
@@ -272,9 +267,9 @@ func createTheAdminAccount(db *sql.DB, verbose bool) error {
 			fmt.Println("    Admin account created.")
 		}
 	} else {
-		cmd = "UPDATE user SET email = ?, pwsalt = ?, pwhash = ?, role = ? WHERE userid = ?;"
+		cmd = "UPDATE user SET username = ?, pwsalt = ?, pwhash = ?, role = ? WHERE userid = ?;"
 		stmtUpd, err := tx.Prepare(cmd)
-		_, err = stmtUpd.Exec(email, pwsalt, pwhash, role, userid)
+		_, err = stmtUpd.Exec(username, pwsalt, pwhash, role, userid)
 		if err != nil {
 			return err
 		}
@@ -286,7 +281,7 @@ func createTheAdminAccount(db *sql.DB, verbose bool) error {
 	err = tx.Commit()
 	if verbose {
 		fmt.Println("    Admin account created:")
-		fmt.Println("        username (email): ", email)
+		fmt.Println("        username (username): ", username)
 		fmt.Println("        password: ", password)
 		fmt.Println("        password salt: ", pwsalt)
 		fmt.Println("        password hash: ", pwhash)
@@ -570,55 +565,146 @@ func receiveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *same
 	return "ReceptionComplete", nil
 }
 
-func login(db *sql.DB, auth *samecommon.AuthInfo, verbose bool, email string, password string) error {
+func login(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *samecommon.AuthInfo, username string) error {
+	// Changed this systtem so it's a challenge/response system that also
+	// changes the protocol used on the wire. This protects against the
+	// theoretical possibility that an attacker has the server key but does
+	// not have the password for the individual user. Note: This does not
+	// protect against an attacker who has access to *both* the database
+	// and the incoming/outgoing network traffice (i.e. the company hosting
+	// the server). To protect against that, you need to turn on the
+	// end-to-end encryption.
 	if verbose {
-		fmt.Println("Logging in as email", email, "password", password)
+		fmt.Println("Logging in as username", username)
 	}
-	cmd := "SELECT userid, pwsalt, pwhash, role FROM user WHERE email = ?;"
+	cmd := "SELECT userid, pwsalt, pwhash, role FROM user WHERE username = ?;"
 	stmtSelExisting, err := db.Prepare(cmd)
 	if err != nil {
 		return errors.New("login: " + err.Error())
 	}
-	rowsExisting, err := stmtSelExisting.Query(email)
+	rowsExisting, err := stmtSelExisting.Query(username)
 	if err != nil {
 		return errors.New("login: " + err.Error())
 	}
 	defer rowsExisting.Close()
 	var userid int64
-	var pwsalt string
-	var pwhash string
+	var pwSaltTxt string
+	var pwHashTxt string
 	var role int
 	userid = 0
 	for rowsExisting.Next() {
-		err = rowsExisting.Scan(&userid, &pwsalt, &pwhash, &role)
+		err = rowsExisting.Scan(&userid, &pwSaltTxt, &pwHashTxt, &role)
 		if err != nil {
 			return errors.New("login: " + err.Error())
 		}
 	}
 	if userid == 0 {
-		return errors.New("Email " + `"` + email + `"` + " not found.")
+		return errors.New("Username (email) " + `"` + username + `"` + " not found.")
 	}
-	pwSaltBin, err := hex.DecodeString(pwsalt)
+	pwSaltBin, err := hex.DecodeString(pwSaltTxt)
 	if err != nil {
 		return errors.New("login: " + err.Error())
 	}
-	pwHashBin1 := calculatePwHash(pwSaltBin, password)
-	pwHashBin2, err := hex.DecodeString(pwhash)
+	challengeBin, err := generateChallenge()
 	if err != nil {
 		return errors.New("login: " + err.Error())
 	}
-	if subtle.ConstantTimeCompare(pwHashBin1, pwHashBin2) == 1 {
+	// We've verified the user exists. Now we send our challenge. We don't
+	// have their password and they don't have our salt, so we send our
+	// salt so they can re-create our password hash, which both they and we
+	// will use on the challenge. If the results match, we accept the login
+	// and send them a new key encrypted with the password hash, which the
+	// attacker does not have because we never sent it across the network.
+	msg := wrpc.NewDB()
+	msg.StartDB("Challenge", 0, 1)
+	msg.StartTable("", 2, 1)
+	msg.AddColumn("salt", wrpc.ColByteArray)
+	msg.AddColumn("challenge", wrpc.ColByteArray)
+	msg.StartRow()
+	msg.AddRowColumnByteArray(pwSaltBin)
+	msg.AddRowColumnByteArray(challengeBin)
+	msg.SendDB(wnet)
+	if verbose {
+		fmt.Println("    Salt:", pwSaltTxt)
+		challengeTxt := hex.EncodeToString(challengeBin)
+		fmt.Println("    Challenge:", challengeTxt)
+		fmt.Println("    Sent Challenge message")
+	}
+	//
+	rplmsg, err := wnet.NextMessage()
+	if rplmsg == nil {
+		return errors.New("Returned message is nil. Connection assumed to be closed by same client. Aborting challenge/response attempt.")
+	}
+	if len(rplmsg) == 0 {
+		// if message is empty, we assume the server closed the connection.
+		wnet.Close()
+		return errors.New("Connection closed by same client.")
+	}
+	reply := wrpc.NewDB()
+	reply.ReceiveDB(rplmsg)
+	if verbose {
+		fmt.Println("    Got reply:", reply.GetDBName())
+	}
+	if reply.GetDBName() != "Response" {
+		errmsg, err := reply.GetString(0, 0, 0)
+		if err != nil {
+			return err
+		}
+		return errors.New(reply.GetDBName() + ": " + errmsg)
+	}
+	responseBin, err := reply.GetByteArray(0, 0, 0)
+	if err != nil {
+		return err
+	}
+	if verbose {
+		fmt.Println("    Response received")
+		responseTxt := hex.EncodeToString(responseBin)
+		fmt.Println("    Response:", responseTxt)
+	}
+	// We do the same calculation ourselves to see what the respose should be
+	pwHashBin, err := hex.DecodeString(pwHashTxt)
+	combo := append(pwHashBin, challengeBin...)
+	sum := sha256.Sum256(combo)
+	shouldBeBin := make([]byte, 32)
+	// copy(shouldBeBin,sum) -- gives error second argument to copy should be slice or string; have [32]byte
+	for ii := 0; ii < 32; ii++ {
+		shouldBeBin[ii] = sum[ii]
+	}
+	if verbose {
+		shouldBeTxt := hex.EncodeToString(shouldBeBin)
+		fmt.Println("    Response should be:", shouldBeTxt)
+	}
+	if subtle.ConstantTimeCompare(responseBin, shouldBeBin) == 1 {
 		auth.UserId = userid
 		auth.Role = role
 		if verbose {
-			fmt.Println("    Logged in as email", email, "userid", userid, "role flags:", samecommon.RoleFlagsToString(role))
+			fmt.Println("    Logged in as username", username, "userid", userid, "role flags:", samecommon.RoleFlagsToString(role))
 		}
 		return nil
 	}
 	if verbose {
-		fmt.Println("    Incorrect password.")
+		fmt.Println("    Incorrect challenge/response.")
 	}
-	return errors.New("Incorrect password.")
+	return errors.New("Incorrect challenge/response.")
+	// --------------------------------
+	// candelete everything after this
+	// pwHashBin1 := calculatePwHash(pwSaltBin, password)
+	// pwHashBin2, err := hex.DecodeString(pwhash)
+	// if err != nil {
+	// 	return errors.New("login: " + err.Error())
+	// }
+	// if subtle.ConstantTimeCompare(pwHashBin1, pwHashBin2) == 1 {
+	// 	auth.UserId = userid
+	// 	auth.Role = role
+	// 	if verbose {
+	// 		fmt.Println("    Logged in as username", username, "userid", userid, "role flags:", samecommon.RoleFlagsToString(role))
+	// 	}
+	// 	return nil
+	// }
+	// if verbose {
+	// 	fmt.Println("    Incorrect password.")
+	// }
+	// return errors.New("Incorrect password.")
 }
 
 func listUsers(db *sql.DB, auth *samecommon.AuthInfo) ([]samecommon.ListUserInfo, error) {
@@ -626,7 +712,7 @@ func listUsers(db *sql.DB, auth *samecommon.AuthInfo) ([]samecommon.ListUserInfo
 		return nil, errors.New("Permission denied: User is not assigned to the admin role.")
 	}
 	result := make([]samecommon.ListUserInfo, 0)
-	cmd := "SELECT email, role FROM user WHERE 1 ORDER BY email;"
+	cmd := "SELECT username, role FROM user WHERE 1 ORDER BY username;"
 	stmtSel, err := db.Prepare(cmd)
 	if err != nil {
 		return result, errors.New("listUsers: " + err.Error())
@@ -635,21 +721,21 @@ func listUsers(db *sql.DB, auth *samecommon.AuthInfo) ([]samecommon.ListUserInfo
 	if err != nil {
 		return result, errors.New("listUsers: " + err.Error())
 	}
-	var email string
+	var username string
 	var role int
 	for rows.Next() {
-		err = rows.Scan(&email, &role)
+		err = rows.Scan(&username, &role)
 		if err != nil {
 			return result, errors.New("listUsers: " + err.Error())
 		}
-		result = append(result, samecommon.ListUserInfo{email, role})
+		result = append(result, samecommon.ListUserInfo{username, role})
 	}
 	return result, nil
 }
 
-func addUser(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, email string, role int) (string, error) {
+func addUser(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, username string, role int) (string, error) {
 	if verbose {
-		fmt.Println("Attempting to add User " + email + " added with role:" + samecommon.RoleFlagsToString(role))
+		fmt.Println("Attempting to add User " + username + " with role: " + samecommon.RoleFlagsToString(role))
 	}
 	if (auth.Role & samecommon.RoleAdmin) == 0 {
 		return "", errors.New("Permission denied: User is not assigned to the admin role.")
@@ -658,12 +744,12 @@ func addUser(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, email string, 
 	if err != nil {
 		return "", errors.New("addUser: " + err.Error())
 	}
-	cmd := "SELECT userid FROM user WHERE email = ?;"
+	cmd := "SELECT userid FROM user WHERE username = ?;"
 	stmtSelExisting, err := tx.Prepare(cmd)
 	if err != nil {
 		return "", errors.New("addUser: " + err.Error())
 	}
-	rowsExisting, err := stmtSelExisting.Query(email)
+	rowsExisting, err := stmtSelExisting.Query(username)
 	if err != nil {
 		return "", errors.New("addUser: " + err.Error())
 	}
@@ -697,9 +783,9 @@ func addUser(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, email string, 
 			}
 		}
 		pwsalt := hex.EncodeToString(pwSaltBin)
-		pwHashBin := calculatePwHash(pwSaltBin, password)
+		pwHashBin := samecommon.CalculatePwHash(pwSaltBin, password)
 		pwhash := hex.EncodeToString(pwHashBin)
-		cmd = "INSERT INTO user (email, pwsalt, pwhash, role) VALUES (?, ?, ?, ?);"
+		cmd = "INSERT INTO user (username, pwsalt, pwhash, role) VALUES (?, ?, ?, ?);"
 		stmtIns, err := tx.Prepare(cmd)
 		if err != nil {
 			err2 := tx.Rollback()
@@ -709,7 +795,7 @@ func addUser(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, email string, 
 				return "", errors.New("addUser: " + err.Error())
 			}
 		}
-		_, err = stmtIns.Exec(email, pwsalt, pwhash, role)
+		_, err = stmtIns.Exec(username, pwsalt, pwhash, role)
 		if err != nil {
 			err2 := tx.Rollback()
 			if err2 != nil {
@@ -736,7 +822,7 @@ func addUser(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, email string, 
 		return password, errors.New("addUser: " + err.Error())
 	}
 	if verbose {
-		fmt.Println("    User " + email + " added with role:" + samecommon.RoleFlagsToString(role))
+		fmt.Println("    User " + username + " added with role:" + samecommon.RoleFlagsToString(role))
 	}
 	return password, nil
 }
@@ -840,10 +926,10 @@ func listSyncPoints(db *sql.DB, auth *samecommon.AuthInfo) ([]samecommon.ListSyn
 	return result, nil
 }
 
-func addGrant(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, email string, syncpublicid string, access int) error {
+func addGrant(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, username string, syncpublicid string, access int) error {
 	if verbose {
 		fmt.Println("Granting access to sync point for user.")
-		fmt.Println("    Email:", email)
+		fmt.Println("    Username (email):", username)
 		fmt.Println("    Sync point ID:", syncpublicid)
 	}
 	if (auth.Role & samecommon.RoleAdmin) == 0 {
@@ -853,12 +939,12 @@ func addGrant(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, email string,
 	if err != nil {
 		return errors.New("addGrant: " + err.Error())
 	}
-	cmd := "SELECT userid FROM user WHERE email = ?;"
+	cmd := "SELECT userid FROM user WHERE username = ?;"
 	stmtSelExisting, err := tx.Prepare(cmd)
 	if err != nil {
 		return errors.New("addGrant: " + err.Error())
 	}
-	rowsExisting, err := stmtSelExisting.Query(email)
+	rowsExisting, err := stmtSelExisting.Query(username)
 	if err != nil {
 		return errors.New("addGrant: " + err.Error())
 	}
@@ -876,10 +962,10 @@ func addGrant(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, email string,
 		if err != nil {
 			return errors.New("addGrant: " + err.Error())
 		}
-		return errors.New("Email " + `"` + email + `"` + " not found.")
+		return errors.New("Username (email) " + `"` + username + `"` + " not found.")
 	}
 	if verbose {
-		fmt.Println("    Found email.")
+		fmt.Println("    Found username.")
 	}
 	cmd = "SELECT syncptid FROM syncpoint WHERE publicid = ?;"
 	stmtSelExisting, err = tx.Prepare(cmd)
@@ -966,7 +1052,7 @@ func listGrants(db *sql.DB, auth *samecommon.AuthInfo) ([]samecommon.ListGrantIn
 		return nil, errors.New("Permission denied: User is not assigned to the admin role.")
 	}
 	result := make([]samecommon.ListGrantInfo, 0)
-	cmd := "SELECT user.email, syncpoint.publicid, grant.access FROM user, grant, syncpoint WHERE (user.userid = grant.userid) AND (grant.syncptid = syncpoint.syncptid) ORDER BY user.email;"
+	cmd := "SELECT user.username, syncpoint.publicid, grant.access FROM user, grant, syncpoint WHERE (user.userid = grant.userid) AND (grant.syncptid = syncpoint.syncptid) ORDER BY user.username;"
 	stmtSel, err := db.Prepare(cmd)
 	if err != nil {
 		return result, errors.New("listGrants: " + err.Error())
@@ -975,23 +1061,23 @@ func listGrants(db *sql.DB, auth *samecommon.AuthInfo) ([]samecommon.ListGrantIn
 	if err != nil {
 		return result, errors.New("listGrants: " + err.Error())
 	}
-	var email string
+	var username string
 	var publicid string
 	var access int
 	for rows.Next() {
-		err = rows.Scan(&email, &publicid, &access)
+		err = rows.Scan(&username, &publicid, &access)
 		if err != nil {
 			return result, errors.New("listGrants: " + err.Error())
 		}
-		result = append(result, samecommon.ListGrantInfo{email, publicid, access})
+		result = append(result, samecommon.ListGrantInfo{username, publicid, access})
 	}
 	return result, nil
 }
 
-func deleteGrant(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, email string, syncpublicid string) error {
+func deleteGrant(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, username string, syncpublicid string) error {
 	if verbose {
 		fmt.Println("Revoking access to sync point for user.")
-		fmt.Println("    Email:", email)
+		fmt.Println("    Username (email):", username)
 		fmt.Println("    Sync point ID:", syncpublicid)
 	}
 	if (auth.Role & samecommon.RoleAdmin) == 0 {
@@ -1001,12 +1087,12 @@ func deleteGrant(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, email stri
 	if err != nil {
 		return errors.New("deleteGrant: " + err.Error())
 	}
-	cmd := "SELECT userid FROM user WHERE email = ?;"
+	cmd := "SELECT userid FROM user WHERE username = ?;"
 	stmtSelExisting, err := tx.Prepare(cmd)
 	if err != nil {
 		return errors.New("deleteGrant: " + err.Error())
 	}
-	rowsExisting, err := stmtSelExisting.Query(email)
+	rowsExisting, err := stmtSelExisting.Query(username)
 	if err != nil {
 		return errors.New("deleteGrant: " + err.Error())
 	}
@@ -1024,10 +1110,10 @@ func deleteGrant(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, email stri
 		if err != nil {
 			return errors.New("deleteGrant: " + err.Error())
 		}
-		return errors.New("Email " + `"` + email + `"` + " not found.")
+		return errors.New("Username (email) " + `"` + username + `"` + " not found.")
 	}
 	if verbose {
-		fmt.Println("    Found email.")
+		fmt.Println("    Found username.")
 	}
 	cmd = "SELECT syncptid FROM syncpoint WHERE publicid = ?;"
 	stmtSelExisting, err = tx.Prepare(cmd)
@@ -1083,7 +1169,7 @@ func deleteGrant(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, email stri
 		if err != nil {
 			return errors.New("deleteGrant: " + err.Error())
 		}
-		return errors.New("User " + `"` + email + `"` + " does not have access to " + `"` + syncpublicid + `"` + ".")
+		return errors.New("User " + `"` + username + `"` + " does not have access to " + `"` + syncpublicid + `"` + ".")
 	} else {
 		if verbose {
 			fmt.Println("    User is granted access to sync point. Revoking access.")
@@ -1171,10 +1257,10 @@ func deleteSyncPoint(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, syncpu
 	return nil
 }
 
-func deleteUser(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, email string) error {
+func deleteUser(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, username string) error {
 	if verbose {
 		fmt.Println("Deleting user")
-		fmt.Println("    Email:", email)
+		fmt.Println("    Username (email):", username)
 	}
 	if (auth.Role & samecommon.RoleAdmin) == 0 {
 		return errors.New("Permission denied: User is not assigned to the admin role.")
@@ -1183,12 +1269,12 @@ func deleteUser(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, email strin
 	if err != nil {
 		return errors.New("deleteUser: " + err.Error())
 	}
-	cmd := "SELECT userid FROM user WHERE email = ?;"
+	cmd := "SELECT userid FROM user WHERE username = ?;"
 	stmtSelExisting, err := tx.Prepare(cmd)
 	if err != nil {
 		return errors.New("deleteUser: " + err.Error())
 	}
-	rowsExisting, err := stmtSelExisting.Query(email)
+	rowsExisting, err := stmtSelExisting.Query(username)
 	if err != nil {
 		return errors.New("deleteUser: " + err.Error())
 	}
@@ -1206,10 +1292,10 @@ func deleteUser(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, email strin
 		if err != nil {
 			return errors.New("deleteUser: " + err.Error())
 		}
-		return errors.New("User " + `"` + email + `"` + " not found.")
+		return errors.New("User " + `"` + username + `"` + " not found.")
 	}
 	if verbose {
-		fmt.Println("    Found email.")
+		fmt.Println("    Found username.")
 		fmt.Println("    Deleting access grants for this user.")
 	}
 	cmd = "DELETE FROM grant WHERE userid = ?;"
@@ -1524,14 +1610,14 @@ func markFileDeleted(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *
 }
 
 // Returns: new generated password. (Remember, users are not allowed to choose their own passwords.)
-func resetUserPassword(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *samecommon.AuthInfo, email string) (string, error) {
-	fmt.Println("Resetting user password for:", email)
-	cmd := "SELECT userid FROM user WHERE (email = ?);"
+func resetUserPassword(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *samecommon.AuthInfo, username string) (string, error) {
+	fmt.Println("Resetting user password for:", username)
+	cmd := "SELECT userid FROM user WHERE (username = ?);"
 	stmtSel, err := db.Prepare(cmd)
 	if err != nil {
 		return "", err
 	}
-	rows, err := stmtSel.Query(email)
+	rows, err := stmtSel.Query(username)
 	if err != nil {
 		return "", err
 	}
@@ -1544,7 +1630,7 @@ func resetUserPassword(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth
 		}
 	}
 	if auth.UserId == 0 {
-		return "", errors.New("ResetUserPassword: User " + `"` + email + `"` + " not found.")
+		return "", errors.New("ResetUserPassword: User " + `"` + username + `"` + " not found.")
 	}
 	if verbose {
 		fmt.Println("    User ID is:", userid)
@@ -1568,7 +1654,7 @@ func resetUserPassword(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth
 		return "", errors.New("ResetUserPassword: " + err.Error())
 	}
 	pwsalt := hex.EncodeToString(pwSaltBin)
-	pwHashBin := calculatePwHash(pwSaltBin, password)
+	pwHashBin := samecommon.CalculatePwHash(pwSaltBin, password)
 	pwhash := hex.EncodeToString(pwHashBin)
 	tx, err := db.Begin()
 	if err != nil {
@@ -1642,15 +1728,11 @@ func unmLogin(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB
 	if version != 0 {
 		return errors.New("Login: Version number mismatch.")
 	}
-	email, err := rpc.GetString(0, 0, 0)
+	username, err := rpc.GetString(0, 0, 0)
 	if err != nil {
 		return err
 	}
-	password, err := rpc.GetString(0, 0, 1)
-	if err != nil {
-		return err
-	}
-	err = login(db, auth, verbose, email, password)
+	err = login(verbose, db, wnet, auth, username)
 	wrpc.SendReplyVoid("Login", version, errorToString(err), wnet)
 	return nil
 }
@@ -1667,7 +1749,7 @@ func unmListUsers(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sq
 	reply.AddColumn("", wrpc.ColInt)
 	for ii := 0; ii < len(userlist); ii++ {
 		reply.StartRow()
-		reply.AddRowColumnString(userlist[ii].Email)
+		reply.AddRowColumnString(userlist[ii].Username)
 		reply.AddRowColumnInt(int64(userlist[ii].Role))
 	}
 	reply.StartTable("success", 1, 1)
@@ -1682,9 +1764,9 @@ func unmAddUser(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.
 	if version != 0 {
 		return errors.New("AddUser: Version number mismatch.")
 	}
-	email, err := rpc.GetString(0, 0, 0)
+	username, err := rpc.GetString(0, 0, 0)
 	if err != nil {
-		fmt.Println("unmAdduser: email:", err)
+		fmt.Println("unmAdduser: username:", err)
 		return err
 	}
 	role64, err := rpc.GetInt(0, 0, 1)
@@ -1693,7 +1775,7 @@ func unmAddUser(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.
 		return err
 	}
 	role := int(role64)
-	password, err := addUser(verbose, db, auth, email, role)
+	password, err := addUser(verbose, db, auth, username, role)
 	reply := wrpc.NewDB()
 	reply.StartDB("AddUserReply", 0, 1)
 	reply.StartTable("", 2, 1)
@@ -1751,7 +1833,7 @@ func unmAddGrant(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql
 	if version != 0 {
 		return errors.New("AddGrant: Version number mismatch.")
 	}
-	email, err := rpc.GetString(0, 0, 0)
+	username, err := rpc.GetString(0, 0, 0)
 	if err != nil {
 		return err
 	}
@@ -1764,7 +1846,7 @@ func unmAddGrant(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql
 		return err
 	}
 	access := int(access64)
-	err = addGrant(verbose, db, auth, email, syncpublicid, access)
+	err = addGrant(verbose, db, auth, username, syncpublicid, access)
 	return wrpc.SendReplyVoid("AddGrant", version, errorToString(err), wnet)
 }
 
@@ -1781,7 +1863,7 @@ func unmListGrants(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *s
 	reply.AddColumn("", wrpc.ColInt)
 	for ii := 0; ii < len(grantlist); ii++ {
 		reply.StartRow()
-		reply.AddRowColumnString(grantlist[ii].Email)
+		reply.AddRowColumnString(grantlist[ii].Username)
 		reply.AddRowColumnString(grantlist[ii].PublicId)
 		reply.AddRowColumnInt(int64(grantlist[ii].Access))
 	}
@@ -1797,7 +1879,7 @@ func unmDeleteGrant(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *
 	if version != 0 {
 		return errors.New("DeleteGrant: Version number mismatch.")
 	}
-	email, err := rpc.GetString(0, 0, 0)
+	username, err := rpc.GetString(0, 0, 0)
 	if err != nil {
 		return err
 	}
@@ -1805,7 +1887,7 @@ func unmDeleteGrant(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *
 	if err != nil {
 		return err
 	}
-	err = deleteGrant(verbose, db, auth, email, syncpublicid)
+	err = deleteGrant(verbose, db, auth, username, syncpublicid)
 	return wrpc.SendReplyVoid("DeleteGrant", version, errorToString(err), wnet)
 }
 
@@ -1825,11 +1907,11 @@ func unmDeleteUser(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *s
 	if version != 0 {
 		return errors.New("DeleteUser: Version number mismatch.")
 	}
-	email, err := rpc.GetString(0, 0, 0)
+	username, err := rpc.GetString(0, 0, 0)
 	if err != nil {
 		return err
 	}
-	err = deleteUser(verbose, db, auth, email)
+	err = deleteUser(verbose, db, auth, username)
 	return wrpc.SendReplyVoid("DeleteUser", version, errorToString(err), wnet)
 }
 
@@ -1915,11 +1997,11 @@ func unmResetUserPassword(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection
 	if version != 0 {
 		return errors.New("ResetUserPassword: Version number mismatch.")
 	}
-	email, err := rpc.GetString(0, 0, 0)
+	username, err := rpc.GetString(0, 0, 0)
 	if err != nil {
 		return err
 	}
-	password, err := resetUserPassword(verbose, db, wnet, auth, email)
+	password, err := resetUserPassword(verbose, db, wnet, auth, username)
 	return wrpc.SendReplyScalarString("ResetUserPassword", version, password, errorToString(err), wnet)
 }
 
@@ -2046,7 +2128,7 @@ func main() {
 	showKeys := *kflag
 	createAdmin := *aflag
 	if verbose {
-		fmt.Println("samed version 0.3.7")
+		fmt.Println("samed version 0.4.0")
 		fmt.Println("Flags:")
 		fmt.Println("    Generate key mode:", onOff(generateKeys))
 		fmt.Println("    Initialize:", onOff(initialize))

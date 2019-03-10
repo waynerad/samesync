@@ -2,6 +2,7 @@ package samecommon
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	_ "github.com/mattn/go-sqlite3"
 	"os"
@@ -19,7 +20,7 @@ type AuthInfo struct {
 }
 
 type ListUserInfo struct {
-	Email string
+	Username string
 	Role  int
 }
 
@@ -29,7 +30,7 @@ type ListSyncPointInfo struct {
 }
 
 type ListGrantInfo struct {
-	Email    string
+	Username    string
 	PublicId string
 	Access   int
 }
@@ -215,4 +216,15 @@ func FileExists(filepath string) (bool, error) {
 	}
 	err = fhFile.Close()
 	return true, err
+}
+
+func CalculatePwHash(pwsalt []byte, password string) []byte {
+	combo := append(pwsalt, []byte(password)...)
+	sum := sha256.Sum256([]byte(combo))
+	result := make([]byte, 32)
+	// copy(result,sum) -- gives error second argument to copy should be slice or string; have [32]byte
+	for ii := 0; ii < 32; ii++ {
+		result[ii] = sum[ii]
+	}
+	return result
 }
