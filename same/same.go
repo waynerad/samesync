@@ -126,28 +126,30 @@ func rpcGetTime(wnet wrpc.IWNetConnection) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	reply, err := wrpc.StandardReply(wnet, "GetTime")
-	if err != nil {
-		return 0, err
-	}
-	result, err := reply.GetInt(0, 0, 0)
-	if err != nil {
-		return 0, err
-	}
-	errmsg, err := reply.GetString(0, 0, 1)
-	if err != nil {
-		return 0, err
-	}
-	if errmsg == "" {
-		return result, nil
-	}
-	return result, errors.New(errmsg)
+	result, err := wrpc.StandardIntReply(wnet, "GetTime")
+	return result, err
+	// reply, err := wrpc.StandardReply(wnet, "GetTime")
+	// if err != nil {
+	// 	return 0, err
+	// }
+	// result, err := reply.GetInt(0, 0, 0)
+	// if err != nil {
+	// 	return 0, err
+	// }
+	// errmsg, err := reply.GetString(0, 0, 1)
+	// if err != nil {
+	// 	return 0, err
+	// }
+	// if errmsg != "" {
+	// 	return result, errors.New(errmsg)
+	// }
+	// return result, nil
 }
 
-func rpcLogin(wnet wrpc.IWNetConnection, username string, password string) (string, error) {
-	fmt.Println("debug rpcLogin")
-	fmt.Println("debug     username", username)
-	fmt.Println("debug     password", password)
+func rpcLogin(wnet wrpc.IWNetConnection, username string, password string) error {
+	if wnet == nil {
+		return errors.New("Cannot login: not connected to server.")
+	}
 	rpc := wrpc.NewDB()
 	rpc.StartDB("Login", 0, 1)
 	rpc.StartTable("", 1, 1)
@@ -156,7 +158,7 @@ func rpcLogin(wnet wrpc.IWNetConnection, username string, password string) (stri
 	rpc.AddRowColumnString(username)
 	err := rpc.SendDB(wnet)
 	if err != nil {
-		return "", err
+		return err
 	}
 	rplmsg, err := wnet.NextMessage()
 	if len(rplmsg) == 0 {
@@ -171,28 +173,25 @@ func rpcLogin(wnet wrpc.IWNetConnection, username string, password string) (stri
 		// because the login has failed already
 		errmsg, err := reply.GetString(0, 0, 0)
 		if err != nil {
-			return "", err
+			return err
 		}
-		return errmsg, nil
+		return errors.New(errmsg)
 	}
 	if reply.GetDBName() != "Challenge" {
 		errmsg, err := reply.GetString(0, 0, 0)
 		if err != nil {
-			panic(err)
+			return err
 		}
-		panic(errors.New(reply.GetDBName() + ": " + errmsg))
+		return errors.New(reply.GetDBName() + ": " + errmsg)
 	}
 	saltBin, err := reply.GetByteArray(0, 0, 0)
 	if err != nil {
-		panic(err)
+		return err
 	}
 	challengeBin, err := reply.GetByteArray(0, 0, 1)
 	if err != nil {
-		panic(err)
+		return err
 	}
-	fmt.Println("debug     Challenge received")
-	fmt.Println("debug     Salt:", hex.EncodeToString(saltBin))
-	fmt.Println("debug     Challenge", hex.EncodeToString(challengeBin))
 	// We use our password and their salt to reproduce the password hash
 	// they they have on their end
 	theirHash := samecommon.CalculatePwHash(saltBin, password)
@@ -205,7 +204,6 @@ func rpcLogin(wnet wrpc.IWNetConnection, username string, password string) (stri
 	for ii := 0; ii < 32; ii++ {
 		response[ii] = sum[ii]
 	}
-	fmt.Println("debug     Response", hex.EncodeToString(response))
 	// send response back
 	rpc = wrpc.NewDB()
 	rpc.StartDB("Response", 0, 1)
@@ -215,44 +213,53 @@ func rpcLogin(wnet wrpc.IWNetConnection, username string, password string) (stri
 	rpc.AddRowColumnByteArray(response)
 	err = rpc.SendDB(wnet)
 	if err != nil {
-		return "", err
+		return err
 	}
-	errmsg, err := wrpc.StandardVoidReply(wnet, "Login")
-	return errmsg, err
+	err = wrpc.StandardVoidReply(wnet, "Login")
+	return err
 }
 
-func rpcListUsers(wnet wrpc.IWNetConnection) string {
+func rpcListUsers(wnet wrpc.IWNetConnection) error {
+	if wnet == nil {
+		return errors.New("Cannot list users: not connected to server.")
+	}
 	rpc := wrpc.NewDB()
 	rpc.StartDB("ListUsers", 0, 0)
 	err := rpc.SendDB(wnet)
 	if err != nil {
-		return err.Error()
+		return err
 	}
 	reply, err := wrpc.StandardReply(wnet, "ListUsers")
 	if err != nil {
-		return err.Error()
+		return err
 	}
 	num := reply.GetNumRows(0)
 	for ii := 0; ii < num; ii++ {
 		username, err := reply.GetString(0, ii, 0)
 		if err != nil {
-			return err.Error()
+			return err
 		}
 		role64, err := reply.GetInt(0, ii, 1)
 		if err != nil {
-			return err.Error()
+			return err
 		}
 		role := int(role64)
 		fmt.Println(username, "-", samecommon.RoleFlagsToString(role))
 	}
 	errmsg, err := reply.GetString(1, 0, 0)
 	if err != nil {
-		return err.Error()
+		return err
 	}
-	return errmsg
+	if errmsg != "" {
+		return errors.New(errmsg)
+	}
+	return nil
 }
 
-func rpcAddUser(wnet wrpc.IWNetConnection, username string, role int) (string, string, error) {
+func rpcAddUser(wnet wrpc.IWNetConnection, username string, role int) (string, error) {
+	if wnet == nil {
+		return "", errors.New("Cannot add user: not connected to server.")
+	}
 	rpc := wrpc.NewDB()
 	rpc.StartDB("AddUser", 0, 1)
 	rpc.StartTable("", 2, 1)
@@ -263,24 +270,30 @@ func rpcAddUser(wnet wrpc.IWNetConnection, username string, role int) (string, s
 	rpc.AddRowColumnInt(int64(role))
 	err := rpc.SendDB(wnet)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	reply, err := wrpc.StandardReply(wnet, "AddUser")
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	password, err := reply.GetString(0, 0, 0)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	errmsg, err := reply.GetString(0, 0, 1)
 	if err != nil {
-		return "", "", err
+		return password, err
 	}
-	return password, errmsg, nil
+	if errmsg != "" {
+		return password, errors.New(errmsg)
+	}
+	return password, nil
 }
 
-func rpcAddSyncPoint(wnet wrpc.IWNetConnection, path string) (string, string, error) {
+func rpcAddSyncPoint(wnet wrpc.IWNetConnection, path string) (string, error) {
+	if wnet == nil {
+		return "", errors.New("Cannot add sync point: not connected to server.")
+	}
 	rpc := wrpc.NewDB()
 	rpc.StartDB("AddSyncPoint", 0, 1)
 	rpc.StartTable("", 0, 0)
@@ -290,39 +303,45 @@ func rpcAddSyncPoint(wnet wrpc.IWNetConnection, path string) (string, string, er
 	rpc.SendDB(wnet)
 	reply, err := wrpc.StandardReply(wnet, "AddSyncPoint")
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	publicid, err := reply.GetString(0, 0, 0)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	errmsg, err := reply.GetString(0, 0, 1)
 	if err != nil {
-		return "", "", err
+		return publicid, err
 	}
-	return publicid, errmsg, err
+	if errmsg != "" {
+		return publicid, errors.New(errmsg)
+	}
+	return publicid, nil
 }
 
-func rpcListSyncPoints(wnet wrpc.IWNetConnection, server string) string {
+func rpcListSyncPoints(wnet wrpc.IWNetConnection, server string) error {
+	if wnet == nil {
+		return errors.New("Cannot list sync points: not connected to server.")
+	}
 	rpc := wrpc.NewDB()
 	rpc.StartDB("ListSyncPoints", 0, 0)
 	err := rpc.SendDB(wnet)
 	if err != nil {
-		return err.Error()
+		return err
 	}
 	reply, err := wrpc.StandardReply(wnet, "ListSyncPoints")
 	if err != nil {
-		return err.Error()
+		return err
 	}
 	num := reply.GetNumRows(0)
 	for ii := 0; ii < num; ii++ {
 		publicid, err := reply.GetString(0, ii, 0)
 		if err != nil {
-			return err.Error()
+			return err
 		}
 		path, err := reply.GetString(0, ii, 1)
 		if err != nil {
-			return err.Error()
+			return err
 		}
 		target := "//" + server
 		if path[0] == '/' {
@@ -334,12 +353,18 @@ func rpcListSyncPoints(wnet wrpc.IWNetConnection, server string) string {
 	}
 	errmsg, err := reply.GetString(1, 0, 0)
 	if err != nil {
-		return err.Error()
+		return err
 	}
-	return errmsg
+	if errmsg != "" {
+		return errors.New(errmsg)
+	}
+	return nil
 }
 
-func rpcAddGrant(wnet wrpc.IWNetConnection, username string, syncpublicid string, access int) (string, error) {
+func rpcAddGrant(wnet wrpc.IWNetConnection, username string, syncpublicid string, access int) error {
+	if wnet == nil {
+		return errors.New("Cannot add grant: not connected to server.")
+	}
 	rpc := wrpc.NewDB()
 	rpc.StartDB("AddGrant", 0, 1)
 	rpc.StartTable("", 0, 0)
@@ -352,48 +377,57 @@ func rpcAddGrant(wnet wrpc.IWNetConnection, username string, syncpublicid string
 	rpc.AddRowColumnInt(int64(access))
 	err := rpc.SendDB(wnet)
 	if err != nil {
-		return "", err
+		return err
 	}
-	errmsg, err := wrpc.StandardVoidReply(wnet, "AddGrant")
-	return errmsg, err
+	err = wrpc.StandardVoidReply(wnet, "AddGrant")
+	return err
 }
 
-func rpcListGrants(wnet wrpc.IWNetConnection) string {
+func rpcListGrants(wnet wrpc.IWNetConnection) error {
+	if wnet == nil {
+		return errors.New("Cannot list grants: not connected to server.")
+	}
 	rpc := wrpc.NewDB()
 	rpc.StartDB("ListGrants", 0, 0)
 	err := rpc.SendDB(wnet)
 	if err != nil {
-		return err.Error()
+		return err
 	}
 	reply, err := wrpc.StandardReply(wnet, "ListGrants")
 	if err != nil {
-		return err.Error()
+		return err
 	}
 	num := reply.GetNumRows(0)
 	for ii := 0; ii < num; ii++ {
 		username, err := reply.GetString(0, ii, 0)
 		if err != nil {
-			return err.Error()
+			return err
 		}
 		publicid, err := reply.GetString(0, ii, 1)
 		if err != nil {
-			return err.Error()
+			return err
 		}
 		access64, err := reply.GetInt(0, ii, 2)
 		if err != nil {
-			return err.Error()
+			return err
 		}
 		access := int(access64)
 		fmt.Println(username, "-> has access to sync point ->", publicid, "-> with permissions:", samecommon.AccessFlagsToString(access))
 	}
 	errmsg, err := reply.GetString(1, 0, 0)
 	if err != nil {
-		return err.Error()
+		return err
 	}
-	return errmsg
+	if errmsg != "" {
+		return errors.New(errmsg)
+	}
+	return nil
 }
 
-func rpcDeleteUser(wnet wrpc.IWNetConnection, username string) (string, error) {
+func rpcDeleteUser(wnet wrpc.IWNetConnection, username string) error {
+	if wnet == nil {
+		return errors.New("Cannot delete user: not connected to server.")
+	}
 	rpc := wrpc.NewDB()
 	rpc.StartDB("DeleteUser", 0, 1)
 	rpc.StartTable("", 1, 1)
@@ -402,13 +436,16 @@ func rpcDeleteUser(wnet wrpc.IWNetConnection, username string) (string, error) {
 	rpc.AddRowColumnString(username)
 	err := rpc.SendDB(wnet)
 	if err != nil {
-		return "", err
+		return err
 	}
-	errmsg, err := wrpc.StandardVoidReply(wnet, "DeleteUser")
-	return errmsg, err
+	err = wrpc.StandardVoidReply(wnet, "DeleteUser")
+	return err
 }
 
-func rpcDeleteSyncPoint(wnet wrpc.IWNetConnection, path string) (string, error) {
+func rpcDeleteSyncPoint(wnet wrpc.IWNetConnection, path string) error {
+	if wnet == nil {
+		return errors.New("Cannot delete sync point: not connected to server.")
+	}
 	rpc := wrpc.NewDB()
 	rpc.StartDB("DeleteSyncPoint", 0, 1)
 	rpc.StartTable("", 1, 1)
@@ -417,13 +454,16 @@ func rpcDeleteSyncPoint(wnet wrpc.IWNetConnection, path string) (string, error) 
 	rpc.AddRowColumnString(path)
 	err := rpc.SendDB(wnet)
 	if err != nil {
-		return "", err
+		return err
 	}
-	errmsg, err := wrpc.StandardVoidReply(wnet, "DeleteSyncPoint")
-	return errmsg, err
+	err = wrpc.StandardVoidReply(wnet, "DeleteSyncPoint")
+	return err
 }
 
-func rpcDeleteGrant(wnet wrpc.IWNetConnection, username string, syncpublicid string) (string, error) {
+func rpcDeleteGrant(wnet wrpc.IWNetConnection, username string, syncpublicid string) error {
+	if wnet == nil {
+		return errors.New("Cannot delete grant: not connected to server.")
+	}
 	rpc := wrpc.NewDB()
 	rpc.StartDB("DeleteGrant", 0, 1)
 	rpc.StartTable("", 2, 1)
@@ -434,10 +474,10 @@ func rpcDeleteGrant(wnet wrpc.IWNetConnection, username string, syncpublicid str
 	rpc.AddRowColumnString(syncpublicid)
 	err := rpc.SendDB(wnet)
 	if err != nil {
-		return "", err
+		return err
 	}
-	errmsg, err := wrpc.StandardVoidReply(wnet, "DeleteGrant")
-	return errmsg, err
+	err = wrpc.StandardVoidReply(wnet, "DeleteGrant")
+	return err
 }
 
 func rpcGetServerTreeForSyncPoint(wnet wrpc.IWNetConnection, syncpublicid string) ([]samecommon.SameFileInfo, error) {
@@ -486,15 +526,15 @@ func rpcGetServerTreeForSyncPoint(wnet wrpc.IWNetConnection, syncpublicid string
 	return result, nil
 }
 
-func sendFile(wnet wrpc.IWNetConnection, syncpublicid string, localdir string, localfilepath string, filehash string, serverTimeOffset int64) string {
+func sendFile(wnet wrpc.IWNetConnection, syncpublicid string, localdir string, localfilepath string, filehash string, serverTimeOffset int64) error {
 	info, err := os.Stat(localfilepath)
 	if err != nil {
-		panic(err)
+		return err
 	}
 	if info.IsDir() {
 		fmt.Println("localfilepath", localfilepath)
 		fmt.Println("info", info)
-		panic("File given to transfer is a directory")
+		return errors.New("File given to transfer is a directory")
 	}
 	//
 	// Step 1: Call ReceiveFile API on remote server, tell them the
@@ -526,28 +566,27 @@ func sendFile(wnet wrpc.IWNetConnection, syncpublicid string, localdir string, l
 	if len(rplmsg) == 0 {
 		// if message is empty, we assume the server closed the connection.
 		wnet.Close()
-		panic("Connection closed by same server.")
+		return errors.New("Connection closed by same server.")
 	}
 	reply := wrpc.NewDB()
 	reply.ReceiveDB(rplmsg)
 	if reply.GetDBName() != "ReceiveFileReply" {
 		errmsg, err := reply.GetString(0, 0, 0)
 		if err != nil {
-			panic(err)
+			return err
 		}
-		panic(errors.New(reply.GetDBName() + ": " + errmsg))
+		return errors.New(reply.GetDBName() + ": " + errmsg)
 	}
 	result, err := reply.GetString(0, 0, 0)
 	if err != nil {
-		panic(err)
+		return err
 	}
 	errmsg, err := reply.GetString(0, 0, 1)
 	if err != nil {
-		panic(err)
+		return err
 	}
 	if result != "GoAheadAndSend" {
-		fmt.Println("Something is wrong. Not sending file.")
-		panic(errors.New(errmsg))
+		return errors.New(errmsg)
 	}
 	//
 	// Step 3: Actually send the file
@@ -559,21 +598,21 @@ func sendFile(wnet wrpc.IWNetConnection, syncpublicid string, localdir string, l
 	//
 	fh, err := os.Open(samecommon.MakePathSeparatorsForThisOS(localfilepath))
 	if err != nil {
-		panic(err)
+		return err
 	}
 	keepGoing := true
 	for keepGoing {
 		n, err := fh.Read(buffer)
 		if err == nil {
-			err = wnet.ShoveBytes(buffer[:n], ciphertext[:n]) // UHU
+			err = wnet.ShoveBytes(buffer[:n], ciphertext[:n])
 			if err != nil {
-				panic(nil)
+				return err
 			}
 		} else {
 			if err == io.EOF {
 				keepGoing = false
 			} else {
-				panic(err)
+				return err
 			}
 		}
 	}
@@ -591,16 +630,22 @@ func sendFile(wnet wrpc.IWNetConnection, syncpublicid string, localdir string, l
 	reply.ReceiveDB(rplmsg)
 	result, err = reply.GetString(0, 0, 0)
 	if err != nil {
-		panic(err)
+		return err
 	}
 	errmsg, err = reply.GetString(0, 0, 1)
 	if err != nil {
-		panic(err)
+		return err
 	}
-	return result
+	if errmsg != "" {
+		return errors.New(errmsg)
+	}
+	if result != "ReceptionComplete" {
+		return errors.New(result)
+	}
+	return nil
 }
 
-func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpublicid string, localdir string, localfilepath string, filehash string, serverTimeOffset int64) string {
+func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpublicid string, localdir string, localfilepath string, filehash string, serverTimeOffset int64) error {
 	if verbose {
 		fmt.Println("Seeking to update file:", localfilepath)
 	}
@@ -628,13 +673,12 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 	// going to receive
 	replmsg, err := wnet.NextMessage()
 	if err != nil {
-		panic(err)
-		return err.Error()
+		return err
 	}
 	if len(replmsg) == 0 {
 		// if message is empty, we assume the server closed the connection.
 		wnet.Close()
-		return "Connection closed by same server."
+		return errors.New("Connection closed by same server.")
 	}
 	reply := wrpc.NewDB()
 	reply.ReceiveDB(replmsg)
@@ -645,31 +689,31 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 		if verbose {
 			fmt.Println("    File does not exist")
 		}
-		return "NoExist"
+		return errors.New("NoExist")
 	}
 	if reply.GetDBName() != "ReceiveFile" {
 		errmsg, err := reply.GetString(0, 0, 0)
 		if err != nil {
 			panic(err)
-			return reply.GetDBName()
+			return errors.New(reply.GetDBName())
 		}
-		return reply.GetDBName() + ": " + errmsg
+		return errors.New(reply.GetDBName() + ": " + errmsg)
 	}
 	filepath, err := reply.GetString(0, 0, 0)
 	if err != nil {
-		return err.Error()
+		return err
 	}
 	filesize, err := reply.GetInt(0, 0, 1)
 	if err != nil {
-		return err.Error()
+		return err
 	}
 	modtime, err := reply.GetInt(0, 0, 2)
 	if err != nil {
-		return err.Error()
+		return err
 	}
 	receiveFileHash, err := reply.GetString(0, 0, 3)
 	if err != nil {
-		return err.Error()
+		return err
 	}
 	modtime -= serverTimeOffset
 	if verbose {
@@ -679,13 +723,13 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 		fmt.Println("    File hash:", receiveFileHash)
 	}
 	if receiveFileHash != filehash {
-		return "Received file hash does not match expected file hash."
+		return errors.New("Received file hash does not match expected file hash.")
 	}
 	//
 	// Step 3: Send ReceiveFileReply with "GoAheadAndSend"
 	err = wrpc.SendReplyScalarString("ReceiveFile", version, "GoAheadAndSend", "", wnet)
 	if err != nil {
-		return err.Error()
+		return err
 	}
 	//
 	// Step 4: Actually receive the bytes of the file
@@ -697,7 +741,7 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 	}
 	fhOut, err = os.Create(samecommon.MakePathSeparatorsForThisOS(localdir + string(os.PathSeparator) + tempFileName))
 	if err != nil {
-		return "receiveFile: " + err.Error()
+		return errors.New("receiveFile: " + err.Error())
 	}
 	var bytesread int64
 	bytesread = 0
@@ -710,19 +754,19 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 	for bytesread < filesize {
 		lrest := filesize - bytesread
 		if lrest > bufferSize {
-			nIn, err = wnet.PullBytes(buffer, ciphertext) // UHU
+			nIn, err = wnet.PullBytes(buffer, ciphertext)
 		} else {
 			nIn, err = wnet.PullBytes(buffer[:lrest], ciphertext[:lrest])
 		}
 		if err != nil {
-			return "receiveFile: " + err.Error()
+			return errors.New("receiveFile: " + err.Error())
 		}
 		nOut, err = fhOut.Write(buffer[:nIn])
 		if err != nil {
-			return "receiveFile: " + err.Error()
+			return errors.New("receiveFile: " + err.Error())
 		}
 		if nOut != nIn {
-			return "Could no write entire buffer out to file for some unknown reason."
+			return errors.New("Could not write entire buffer out to file for some unknown reason.")
 		}
 		bytesread += int64(nIn)
 	}
@@ -742,11 +786,11 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 	if err != nil {
 		mkerr := samecommon.MakePathForFile(localdir + samecommon.MakePathSeparatorsForThisOS(filepath))
 		if mkerr != nil {
-			return "receiveFile: " + err.Error()
+			return errors.New("receiveFile: " + err.Error())
 		}
 		mverr := os.Rename(localdir+string(os.PathSeparator)+tempFileName, finalDestinationPath)
 		if mverr != nil {
-			return "receiveFile: " + err.Error()
+			return errors.New("receiveFile: " + err.Error())
 		}
 	}
 	//
@@ -758,7 +802,7 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 	mtime := time.Unix(0, modtime)
 	err = os.Chtimes(finalDestinationPath, mtime, mtime) // using same time as both atime and modtime
 	if err != nil {
-		return err.Error()
+		return err
 	}
 	//
 	// Step 7: Stash all the info about the file in our local database
@@ -770,13 +814,13 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 	// we take the remote server's word for the file hash, though.
 	finalInfo, err := os.Stat(finalDestinationPath)
 	if err != nil {
-		return err.Error()
+		return err
 	}
 	finalFileSize := finalInfo.Size()
 	finalModTime := finalInfo.ModTime().UnixNano()
 	err = stashFileInfo(db, filepath, finalFileSize, finalModTime, filehash)
 	if err != nil {
-		return "receiveFile: " + err.Error()
+		return errors.New("receiveFile: " + err.Error())
 	}
 	if verbose {
 		fmt.Println("    Sending reception complete message.")
@@ -789,10 +833,10 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 	if verbose {
 		fmt.Println("    Reception complete.")
 	}
-	return errmsg
+	return nil
 }
 
-func rpcMarkFileDeleted(verbose bool, wnet wrpc.IWNetConnection, syncpublicid string, filepath string, filehash string, serverTimeOffset int64) (string, error) {
+func rpcMarkFileDeleted(verbose bool, wnet wrpc.IWNetConnection, syncpublicid string, filepath string, filehash string, serverTimeOffset int64) error {
 	modtime := time.Now().UnixNano()
 	if verbose {
 		fmt.Println("Marking remote file for deletion:", filepath, "with modtime", modtime)
@@ -813,13 +857,16 @@ func rpcMarkFileDeleted(verbose bool, wnet wrpc.IWNetConnection, syncpublicid st
 	rpc.AddRowColumnString(filehash)
 	err := rpc.SendDB(wnet)
 	if err != nil {
-		return "", err
+		return err
 	}
-	errmsg, err := wrpc.StandardVoidReply(wnet, "MarkFileDeleted")
-	return errmsg, err
+	err = wrpc.StandardVoidReply(wnet, "MarkFileDeleted")
+	return err
 }
 
-func rpcResetUserPassword(wnet wrpc.IWNetConnection, username string) (string, string, error) {
+func rpcResetUserPassword(wnet wrpc.IWNetConnection, username string) (string, error) {
+	if wnet == nil {
+		return "", errors.New("Cannot reset user password: not connected to server.")
+	}
 	rpc := wrpc.NewDB()
 	rpc.StartDB("ResetUserPassword", 0, 1)
 	rpc.StartTable("", 1, 1)
@@ -828,15 +875,70 @@ func rpcResetUserPassword(wnet wrpc.IWNetConnection, username string) (string, s
 	rpc.AddRowColumnString(username)
 	err := rpc.SendDB(wnet)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
-	password, errmsg, err := wrpc.StandardStringReply(wnet, "ResetUserPassword")
-	return password, errmsg, err
+	password, err := wrpc.StandardStringReply(wnet, "ResetUserPassword")
+	return password, err
+}
+
+func rpcUploadAllHashes(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpublicid string, serverTimeOffset int64) error {
+	if wnet == nil {
+		return errors.New("Cannot upload hashes: not connected to server.")
+	}
+	rpc := wrpc.NewDB()
+	rpc.StartDB("UploadAllHashes", 0, 2)
+	rpc.StartTable("syncpoint", 1, 1)
+	rpc.AddColumn("syncpoint", wrpc.ColString)
+	rpc.StartRow()
+	rpc.AddRowColumnString(syncpublicid)
+	rpc.StartTable("hashes", 3, 0)
+	rpc.AddColumn("filepath", wrpc.ColString)
+	rpc.AddColumn("modtime", wrpc.ColInt)
+	rpc.AddColumn("hash", wrpc.ColString)
+	cmd := "SELECT filepath, filetime, filehash FROM fileinfo WHERE 1;"
+	stmtSel, err := db.Prepare(cmd)
+	checkError(err)
+	rows, err := stmtSel.Query()
+	checkError(err)
+	defer rows.Close()
+	var filepath string
+	var modtime int64
+	var filehash string
+	for rows.Next() {
+		err = rows.Scan(&filepath, &modtime, &filehash)
+		checkError(err)
+		rpc.StartRow()
+		if verbose {
+			fmt.Println("    adding file", filepath, "mod time", modtime+serverTimeOffset, "file hash", filehash)
+		}
+		rpc.AddRowColumnString(filepath)
+		rpc.AddRowColumnInt(modtime + serverTimeOffset)
+		rpc.AddRowColumnString(filehash)
+	}
+	err = rpc.SendDB(wnet)
+	if err != nil {
+		return err
+	}
+	err = wrpc.StandardVoidReply(wnet, "UploadAllHashes")
+	return err
 }
 
 // ----------------------------------------------------------------
 // End of remote calls
 // ----------------------------------------------------------------
+
+func getServerTimeOffset(wnet wrpc.IWNetConnection) (int64, error) {
+	localTime1 := getLocalTime()
+	var remoteTime int64
+	var err error
+	remoteTime, err = rpcGetTime(wnet)
+	if err != nil {
+		return 0, err
+	}
+	localTime2 := getLocalTime()
+	serverTimeOffset := remoteTime - (localTime1 + ((localTime2 - localTime1) >> 1))
+	return serverTimeOffset, nil
+}
 
 func onOff(bv bool) string {
 	if bv {
@@ -939,37 +1041,6 @@ func initializeDatabase(db *sql.DB) {
 	checkError(err)
 }
 
-func dupsetNameValuePair(db *sql.DB, name string, value string) {
-	tx, err := db.Begin()
-	checkError(err)
-	cmd := "SELECT nvpairid FROM settings WHERE name = ?;"
-	stmtSelExisting, err := tx.Prepare(cmd)
-	checkError(err)
-	rowsExisting, err := stmtSelExisting.Query(name)
-	checkError(err)
-	defer rowsExisting.Close()
-	var nvpairid int64
-	nvpairid = 0
-	for rowsExisting.Next() {
-		err = rowsExisting.Scan(&nvpairid)
-		checkError(err)
-	}
-	if nvpairid == 0 {
-		cmd = "INSERT INTO settings (name, value) VALUES (?, ?);"
-		stmtIns, err := tx.Prepare(cmd)
-		checkError(err)
-		_, err = stmtIns.Exec(name, value)
-		checkError(err)
-	} else {
-		cmd = "UPDATE settings SET value = ? where nvpairid = ?;"
-		stmtUpd, err := tx.Prepare(cmd)
-		_, err = stmtUpd.Exec(value, nvpairid)
-		checkError(err)
-	}
-	err = tx.Commit()
-	checkError(err)
-}
-
 func getValue(db *sql.DB, name string, defval string) string {
 	var value string
 	value = defval
@@ -994,12 +1065,8 @@ func showConfiguration(db *sql.DB, verbose bool) {
 	syncPointID := getValue(db, "syncpointid", "")
 	fmt.Println("Server:", server)
 	fmt.Println("Port:", port)
-	fmt.Println("Username (email):", username)
-	fmt.Println("Password:", password)
-	fmt.Println("Sync point ID:", syncPointID)
-
 	serverSymKey := getValue(db, "serversymkey", "")
-	if serverSymKey == "" {
+	if serverSymKey != "" {
 		fmt.Println("Server key (next two lines):")
 		fmt.Println(serverSymKey)
 	}
@@ -1007,7 +1074,6 @@ func showConfiguration(db *sql.DB, verbose bool) {
 	if serverHmacKey != "" {
 		fmt.Println(serverHmacKey)
 	}
-
 	endToEndSymKey := getValue(db, "endtoendsymkey", "")
 	if endToEndSymKey != "" {
 		fmt.Println("End-to-end encryption key (next two lines):")
@@ -1017,6 +1083,10 @@ func showConfiguration(db *sql.DB, verbose bool) {
 	if endToEndHmacKey != "" {
 		fmt.Println(endToEndHmacKey)
 	}
+	fmt.Println("")
+	fmt.Println("Username (email):", username)
+	fmt.Println("Password:", password)
+	fmt.Println("Sync point ID:", syncPointID)
 }
 
 func generateAESKey() ([]byte, error) {
@@ -1029,388 +1099,6 @@ func generateSHAKey() ([]byte, error) {
 	key := make([]byte, 32)
 	_, err := rand.Read(key)
 	return key, err
-}
-
-func getYesNo(reader *bufio.Reader, prompt string) bool {
-	result := false
-	haveResult := false
-	for !haveResult {
-		fmt.Print(prompt)
-		yesno, err := reader.ReadString('\n')
-		checkError(err)
-		if len(yesno) > 0 {
-			yesno = yesno[:1]
-		}
-		if (yesno == "Y") || (yesno == "y") {
-			result = true
-			haveResult = true
-		}
-		if (yesno == "N") || (yesno == "n") {
-			result = false
-			haveResult = true
-		}
-	}
-	return result
-}
-
-func getLine(reader *bufio.Reader) string {
-	result, err := reader.ReadString('\n')
-	checkError(err)
-	return trim(result)
-}
-
-func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, verbose bool) {
-	keyboard := bufio.NewReader(os.Stdin)
-	fmt.Print("Admin password: ")
-	password := getLine(keyboard)
-	errmsg, err := rpcLogin(wnet, "admin", password)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	if errmsg != "" {
-		fmt.Println(errmsg)
-		return
-	}
-	for {
-		fmt.Print("> ")
-		command, err := keyboard.ReadString('\n')
-		if err != nil {
-			if err == io.EOF {
-				fmt.Println("")
-				return
-			}
-		}
-		checkError(err)
-		command = trim(command)
-		params := strings.Split(command, " ")
-		if len(params) > 0 {
-			switch params[0] {
-			case "list":
-				if len(params) == 1 {
-					fmt.Println("List what?")
-					fmt.Println("    users -- list users")
-					fmt.Println("    syncpoints -- list sync points")
-					fmt.Println("    grants -- list access grants of users to sync points")
-				} else {
-					switch params[1] {
-					case "users":
-						errmsg := rpcListUsers(wnet)
-						if errmsg != "" {
-							fmt.Println(errmsg)
-						}
-					case "syncpoints":
-						server := getValue(db, "server", "")
-						if verbose {
-							fmt.Println("server =", server)
-						}
-						errmsg := rpcListSyncPoints(wnet, server)
-						if errmsg != "" {
-							fmt.Println(errmsg)
-						}
-					case "grants":
-						errmsg := rpcListGrants(wnet)
-						if errmsg != "" {
-							fmt.Println(errmsg)
-						}
-					default:
-						fmt.Println("List: " + `"` + params[1] + `"` + " not found.")
-					}
-				}
-			case "local":
-				if len(params) == 1 {
-					fmt.Println("local what?")
-					fmt.Println("    show config -- show configuration on local machine")
-				} else {
-					switch params[1] {
-					case "show":
-						if len(params) == 2 {
-							fmt.Println("local show what?")
-							fmt.Println("    config -- show current configuration")
-						} else {
-							switch params[2] {
-							case "config":
-								showConfiguration(db, verbose)
-							default:
-								fmt.Println("local show: " + `"` + params[2] + `"` + " not found.")
-							}
-						}
-					default:
-						fmt.Println("local: " + `"` + params[1] + `"` + " not found.")
-					}
-				}
-			case "add":
-				if len(params) == 1 {
-					fmt.Println("Add what?")
-					fmt.Println("    user -- add user")
-					fmt.Println("    syncpoint -- add sync point on server using absolute path")
-					fmt.Println("    grant -- grant a user access to a sync point")
-				} else {
-					switch params[1] {
-					case "user":
-						fmt.Print("Username (email): ")
-						username := getLine(keyboard)
-						if verbose {
-							fmt.Println("The username you entered is:", username)
-						}
-						password, errmsg, err := rpcAddUser(wnet, username, samecommon.RoleSyncPointUser)
-						if err != nil {
-							fmt.Println(err)
-							return
-						}
-						if errmsg != "" {
-							if verbose {
-								fmt.Println("adduser failed.")
-							}
-							fmt.Println(errmsg)
-						} else {
-							fmt.Println("User created. Password is:")
-							fmt.Println(password)
-							yes := getYesNo(keyboard, "Set as username and password for this client? (y/n) ")
-							if yes {
-								err = samecommon.SetNameValuePair(db, "username", username)
-								if err != nil {
-									fmt.Println(err)
-									return
-								}
-								if verbose {
-									fmt.Println("username set to", username)
-								}
-								samecommon.SetNameValuePair(db, "password", password)
-								if err != nil {
-									fmt.Println(err)
-									return
-								}
-								if verbose {
-									fmt.Println("password set to", password)
-								}
-							}
-						}
-					case "syncpoint":
-						path := ""
-						for path == "" {
-							fmt.Print("Path on server: ")
-							path = getLine(keyboard)
-						}
-						publicid, errmsg, err := rpcAddSyncPoint(wnet, path)
-						checkError(err)
-						if errmsg != "" {
-							if verbose {
-								fmt.Println("Could not add sync point.")
-							}
-							fmt.Println(errmsg)
-						} else {
-							fmt.Println("The sync point ID is:")
-							fmt.Println(publicid)
-							yes := getYesNo(keyboard, "Set key as sync point for this client? (y/n) ")
-							if yes {
-								samecommon.SetNameValuePair(db, "syncpointid", publicid)
-								if err != nil {
-									fmt.Println(err)
-									return
-								}
-								if verbose {
-									fmt.Println("syncpointid set to", publicid)
-								}
-							}
-						}
-					case "grant":
-						username := ""
-						for username == "" {
-							fmt.Print("Username (email): ")
-							username = getLine(keyboard)
-						}
-						syncpublicid := ""
-						for syncpublicid == "" {
-							fmt.Print("Sync point ID: ")
-							syncpublicid = getLine(keyboard)
-						}
-						access := 0
-						yes := getYesNo(keyboard, "Grant read access? (y/n) ")
-						if yes {
-							access |= samecommon.AccessRead
-						}
-						yes = getYesNo(keyboard, "Grant write access? (y/n) ")
-						if yes {
-							access |= samecommon.AccessWrite
-						}
-						errmsg, err := rpcAddGrant(wnet, username, syncpublicid, access)
-						if err != nil {
-							fmt.Println(err)
-							return
-						}
-						if errmsg != "" {
-							fmt.Println(errmsg)
-						}
-					default:
-						fmt.Println("Add: " + `"` + params[1] + `"` + " not found.")
-					}
-				}
-
-			case "del":
-				if len(params) == 1 {
-					fmt.Println("Delete what?")
-					fmt.Println("    user -- delete user")
-					fmt.Println("    syncpoint -- delete sync point from server")
-					fmt.Println("    grant -- revoke a user's access to a sync point")
-				} else {
-					switch params[1] {
-					case "user":
-						fmt.Print("Username (email): ")
-						username := getLine(keyboard)
-						if verbose {
-							fmt.Println("The username you entered is:", username)
-						}
-						errmsg, err := rpcDeleteUser(wnet, username)
-						if err != nil {
-							fmt.Println(err)
-							return
-						}
-						if errmsg != "" {
-							if verbose {
-								fmt.Println("del user failed.")
-							}
-							fmt.Println(errmsg)
-						}
-					case "syncpoint":
-						syncpublicid := ""
-						for syncpublicid == "" {
-							fmt.Print("Sync point ID: ")
-							syncpublicid = getLine(keyboard)
-						}
-						yes := getYesNo(keyboard, "Are you sure? Doing this will permanently prevent this server directory from ever being used as a syncpoint in the future. You will need to start with a new blank directory on the server if you want these files synced again. All access grants will be deleted and will need to be set up again if you ever want this sync point back. Are you really sure you want to do this? (y/n) ")
-						if yes {
-							errmsg, err := rpcDeleteSyncPoint(wnet, syncpublicid)
-							if err != nil {
-								fmt.Println(err)
-								return
-							}
-							if errmsg != "" {
-								if verbose {
-									fmt.Println("Could not add sync point.")
-								}
-								fmt.Println(errmsg)
-							}
-						}
-					case "grant":
-						username := ""
-						for username == "" {
-							fmt.Print("Username (email): ")
-							username = getLine(keyboard)
-						}
-						syncpublicid := ""
-						for syncpublicid == "" {
-							fmt.Print("Sync point ID: ")
-							syncpublicid = getLine(keyboard)
-						}
-						errmsg, err := rpcDeleteGrant(wnet, username, syncpublicid)
-						if err != nil {
-							fmt.Println(err)
-							return
-						}
-						if errmsg != "" {
-							fmt.Println(errmsg)
-						}
-					default:
-						fmt.Println("Delete: " + `"` + params[1] + `"` + " not found.")
-					}
-				}
-
-			case "reset":
-				if len(params) == 1 {
-					fmt.Println("Reset what?")
-					fmt.Println("    user password -- reset user password")
-				} else {
-					switch params[1] {
-					case "user":
-						if len(params) == 2 {
-							fmt.Println("Reset user what?")
-							fmt.Println("    password -- reset user password")
-						} else {
-							switch params[2] {
-							case "password":
-								fmt.Print("Email: ")
-								username := getLine(keyboard)
-								if verbose {
-									fmt.Println("The username you entered is:", username)
-								}
-								password, errmsg, err := rpcResetUserPassword(wnet, username)
-								if err != nil {
-									fmt.Println(err)
-									return
-								}
-								if errmsg != "" {
-									fmt.Println(errmsg)
-								}
-								fmt.Println("New password:")
-								fmt.Println(password)
-								localEmail := getValue(db, "username", "")
-								if verbose {
-									fmt.Println("username =", localEmail)
-								}
-								if username == localEmail {
-									yes := getYesNo(keyboard, "Set as password for this client? (y/n) ")
-									if yes {
-										samecommon.SetNameValuePair(db, "password", password)
-										if err != nil {
-											fmt.Println(err)
-											return
-										}
-										if verbose {
-											fmt.Println("password set to", password)
-										}
-									}
-								}
-							default:
-								fmt.Println("Reset user: " + `"` + params[2] + `"` + " not found.")
-							}
-						}
-					default:
-						fmt.Println("Reset : " + `"` + params[1] + `"` + " not found.")
-					}
-				}
-			case "help":
-				fmt.Println("list")
-				fmt.Println("    users -- list users")
-				fmt.Println("    syncpoints -- list sync points")
-				fmt.Println("    grants -- list access grants of users to sync points")
-
-				fmt.Println("add")
-				fmt.Println("    user -- add user")
-				fmt.Println("    syncpoint -- add sync point on server using absolute path")
-				fmt.Println("    grant -- grant a user access to a sync point")
-
-				fmt.Println("del")
-				fmt.Println("    user -- delete user")
-				fmt.Println("    syncpoint -- delete sync point from server")
-				fmt.Println("    grant -- revoke a user's access to a sync point")
-
-				fmt.Println("reset")
-				fmt.Println("    user password -- reset user password")
-
-				fmt.Println("local")
-				fmt.Println("    show")
-				fmt.Println("        config -- show local machine current configuration")
-				fmt.Println("help -- this message")
-				fmt.Println("quit -- exit program")
-
-				// fmt.Println("--- the following not implemented yet")
-				// fmt.Println("deluser -- delete user")
-				// fmt.Println("chuserrole -- change user role")
-				// fmt.Println("joinsyncpoint -- add current directory to a sync point")
-				// fmt.Println("abandonsyncpoint -- remove current dirrectory tree from the sync point")
-
-			case "quit":
-				return
-
-			default:
-				if params[0] != "" {
-					fmt.Println("Command " + `"` + params[0] + `"` + " not found.")
-				}
-			}
-
-		}
-	}
 }
 
 // ----------------------------------------------------------------
@@ -1512,7 +1200,7 @@ func calcHash(filePath string) string {
 	return encoded
 }
 
-func putTreeInTableAndFillInHashesThatNeedToBeUpdated(verbose bool, db *sql.DB, tree []samecommon.SameFileInfo, basePath string, deleteUnused bool) {
+func putTreeInTableAndFillInHashesThatNeedToBeUpdated(verbose bool, db *sql.DB, tree []samecommon.SameFileInfo, basePath string) {
 	var deleteMap map[int64]bool
 	deleteMap = make(map[int64]bool)
 
@@ -1744,7 +1432,6 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 						if verbose {
 							fmt.Println("File names are different, local is first")
 						}
-
 						if localTree[localIdx].FileHash == "deleted" {
 							if verbose {
 								fmt.Println("Local file is newer and deleted -- no remote file to delete, so doing nothing.")
@@ -1786,9 +1473,10 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 				fmt.Println("Pushing -->", localTree[toUploadLocal].FilePath[1:])
 				localfilepath := localPath + localTree[toUploadLocal].FilePath
 				filehash := localTree[toUploadLocal].FileHash
-				errmsg := sendFile(wnet, syncpublicid, localPath, localfilepath, filehash, serverTimeOffset)
-				if errmsg != "ReceptionComplete" {
-					fmt.Println(errmsg)
+				err := sendFile(wnet, syncpublicid, localPath, localfilepath, filehash, serverTimeOffset)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, err)
+					return
 				}
 			}
 		}
@@ -1803,12 +1491,13 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 				fmt.Println("Pulling <--", remoteTree[toDownloadRemote].FilePath[1:])
 				localfilepath := localPath + remoteTree[toDownloadRemote].FilePath
 				filehash := remoteTree[toDownloadRemote].FileHash
-				errmsg := retrieveFile(verbose, db, wnet, syncpublicid, localPath, localfilepath, filehash, serverTimeOffset)
-				if errmsg != "" {
+				err := retrieveFile(verbose, db, wnet, syncpublicid, localPath, localfilepath, filehash, serverTimeOffset)
+				if err != nil {
+					errmsg := err.Error()
 					if errmsg == "NoExist" {
 						fmt.Println("    File no longer exists on the server. File is flagged for re-upload. Run same on the machine with the last uploaded version to re-upload it.")
 					} else {
-						fmt.Println(errmsg)
+						fmt.Fprintln(os.Stderr, errmsg)
 						panic(errmsg)
 					}
 				}
@@ -1825,14 +1514,10 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 				fmt.Println("Pushing delete notification: ", remoteTree[toDeleteRemote].FilePath[1:])
 				remotefilepath := remoteTree[toDeleteRemote].FilePath
 				filehash := remoteTree[toDeleteRemote].FileHash
-				errmsg, err := rpcMarkFileDeleted(verbose, wnet, syncpublicid, remotefilepath, filehash, serverTimeOffset)
+				err := rpcMarkFileDeleted(verbose, wnet, syncpublicid, remotefilepath, filehash, serverTimeOffset)
 				if err != nil {
-					fmt.Println(err.Error())
+					fmt.Fprintln(os.Stderr, err.Error())
 					panic(err)
-				}
-				if errmsg != "" {
-					fmt.Println(errmsg)
-					panic(errmsg)
 				}
 			}
 		}
@@ -1858,6 +1543,480 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 func dumpTree(tree []samecommon.SameFileInfo) {
 	for _, fileinfo := range tree {
 		fmt.Println(fileinfo.FilePath)
+	}
+}
+
+// Functions for Admin Mode
+
+func getYesNo(reader *bufio.Reader, prompt string) bool {
+	result := false
+	haveResult := false
+	for !haveResult {
+		fmt.Print(prompt)
+		yesno, err := reader.ReadString('\n')
+		checkError(err)
+		if len(yesno) > 0 {
+			yesno = yesno[:1]
+		}
+		if (yesno == "Y") || (yesno == "y") {
+			result = true
+			haveResult = true
+		}
+		if (yesno == "N") || (yesno == "n") {
+			result = false
+			haveResult = true
+		}
+	}
+	return result
+}
+func getLine(reader *bufio.Reader) string {
+	result, err := reader.ReadString('\n')
+	checkError(err)
+	return trim(result)
+}
+
+func recalculateAllFileHashes(verbose bool, db *sql.DB, rootPath string) {
+	var sortSlice fileSortSlice
+	localTree := make([]samecommon.SameFileInfo, 0)
+	localTree, err := getDirectoryTree(verbose, rootPath, localTree, false)
+	checkError(err)
+	sortSlice.theSlice = localTree
+	sort.Sort(&sortSlice)
+	basePath := rootPath // redundant copy
+	if verbose {
+		fmt.Println("base path:", basePath)
+	}
+	if verbose {
+		fmt.Println("Clearing out previous file hashes")
+	}
+	// Here we TRUNCATE our hash table and start over!
+	tx, err := db.Begin()
+	if err != nil {
+		tx.Rollback()
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
+	cmd := "DELETE FROM fileinfo;"
+	stmtTruncate, err := tx.Prepare(cmd)
+	if err != nil {
+		tx.Rollback()
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
+	_, err = stmtTruncate.Exec()
+	if err != nil {
+		tx.Rollback()
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
+	err = tx.Commit()
+	// And now proceed as normal!
+	if verbose {
+		fmt.Println("Recalculating all file hashes")
+	}
+	putTreeInTableAndFillInHashesThatNeedToBeUpdated(verbose, db, localTree, basePath)
+}
+
+func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, rootPath string, verbose bool) {
+	keyboard := bufio.NewReader(os.Stdin)
+	fmt.Print("Admin password: ")
+	password := getLine(keyboard)
+	err := rpcLogin(wnet, "admin", password)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+	}
+	for {
+		fmt.Print("> ")
+		command, err := keyboard.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				fmt.Println("")
+				return
+			}
+		}
+		checkError(err)
+		command = trim(command)
+		params := strings.Split(command, " ")
+		if len(params) > 0 {
+			switch params[0] {
+			case "list":
+				if len(params) == 1 {
+					fmt.Println("List what?")
+					fmt.Println("    users -- list users")
+					fmt.Println("    syncpoints -- list sync points")
+					fmt.Println("    grants -- list access grants of users to sync points")
+				} else {
+					switch params[1] {
+					case "users":
+						err = rpcListUsers(wnet)
+						if err != nil {
+							fmt.Fprintln(os.Stderr, err)
+						}
+					case "syncpoints":
+						server := getValue(db, "server", "")
+						if verbose {
+							fmt.Println("server =", server)
+						}
+						err = rpcListSyncPoints(wnet, server)
+						if err != nil {
+							fmt.Fprintln(os.Stderr, err)
+						}
+					case "grants":
+						err = rpcListGrants(wnet)
+						if err != nil {
+							fmt.Fprintln(os.Stderr, err)
+						}
+					default:
+						fmt.Println("List: " + `"` + params[1] + `"` + " not found.")
+					}
+				}
+			case "add":
+				if len(params) == 1 {
+					fmt.Println("Add what?")
+					fmt.Println("    user -- add user")
+					fmt.Println("    syncpoint -- add sync point on server")
+					fmt.Println("    grant -- grant a user access to a sync point")
+				} else {
+					switch params[1] {
+					case "user":
+						fmt.Print("Username (email): ")
+						username := getLine(keyboard)
+						if verbose {
+							fmt.Println("The username you entered is:", username)
+						}
+						password, err := rpcAddUser(wnet, username, samecommon.RoleSyncPointUser)
+						if err != nil {
+							if verbose {
+								fmt.Println("adduser failed.")
+							}
+							fmt.Println(err)
+						} else {
+							fmt.Println("User created. Password is:")
+							fmt.Println(password)
+							yes := getYesNo(keyboard, "Set as username and password for this client? (y/n) ")
+							if yes {
+								err = samecommon.SetNameValuePair(db, "username", username)
+								if err != nil {
+									fmt.Fprintln(os.Stderr, err)
+								}
+								if verbose {
+									fmt.Println("username set to", username)
+								}
+								samecommon.SetNameValuePair(db, "password", password)
+								if err != nil {
+									fmt.Fprintln(os.Stderr, err)
+								}
+								if verbose {
+									fmt.Println("password set to", password)
+								}
+							}
+						}
+					case "syncpoint":
+						path := ""
+						for path == "" {
+							fmt.Print("Path on server: ")
+							path = getLine(keyboard)
+						}
+						publicid, err := rpcAddSyncPoint(wnet, path)
+						if err != nil {
+							if verbose {
+								fmt.Println("Could not add sync point.")
+							}
+							fmt.Fprintln(os.Stderr, err)
+						} else {
+							fmt.Println("The sync point ID is:")
+							fmt.Println(publicid)
+							yes := getYesNo(keyboard, "Set key as sync point for this client? (y/n) ")
+							if yes {
+								samecommon.SetNameValuePair(db, "syncpointid", publicid)
+								if err != nil {
+									fmt.Println(os.Stderr, err)
+								}
+								if verbose {
+									fmt.Println("syncpointid set to", publicid)
+								}
+							}
+						}
+					case "grant":
+						username := ""
+						for username == "" {
+							fmt.Print("Username (email): ")
+							username = getLine(keyboard)
+						}
+						syncpublicid := ""
+						for syncpublicid == "" {
+							fmt.Print("Sync point ID: ")
+							syncpublicid = getLine(keyboard)
+						}
+						access := 0
+						yes := getYesNo(keyboard, "Grant read access? (y/n) ")
+						if yes {
+							access |= samecommon.AccessRead
+						}
+						yes = getYesNo(keyboard, "Grant write access? (y/n) ")
+						if yes {
+							access |= samecommon.AccessWrite
+						}
+						err = rpcAddGrant(wnet, username, syncpublicid, access)
+						if err != nil {
+							fmt.Fprintln(os.Stderr, err)
+						}
+					default:
+						fmt.Println("Add: " + `"` + params[1] + `"` + " not found.")
+					}
+				}
+			case "del":
+				if len(params) == 1 {
+					fmt.Println("Delete what?")
+					fmt.Println("    user -- delete user")
+					fmt.Println("    syncpoint -- delete sync point from server")
+					fmt.Println("    grant -- revoke a user's access to a sync point")
+				} else {
+					switch params[1] {
+					case "user":
+						fmt.Print("Username (email): ")
+						username := getLine(keyboard)
+						if verbose {
+							fmt.Println("The username you entered is:", username)
+						}
+						err = rpcDeleteUser(wnet, username)
+						if err != nil {
+							if verbose {
+								fmt.Println("del user failed.")
+							}
+							fmt.Fprintln(os.Stderr, err)
+						}
+					case "syncpoint":
+						syncpublicid := ""
+						for syncpublicid == "" {
+							fmt.Print("Sync point ID: ")
+							syncpublicid = getLine(keyboard)
+						}
+						fmt.Println("Are you sure? Doing this will permanently prevent this server directory from")
+						fmt.Println("ever being used as a syncpoint in the future. You will need to start with a new")
+						fmt.Println("blank directory on the server if you want these files synced again. All access")
+						fmt.Println("grants will be deleted and will need to be set up again if you ever want this")
+						yes := getYesNo(keyboard, "sync point back. Are you really sure you want to do this? (y/n) ")
+						if yes {
+							err = rpcDeleteSyncPoint(wnet, syncpublicid)
+							if err != nil {
+								if verbose {
+									fmt.Println("Could not add sync point.")
+								}
+								fmt.Println(err)
+							}
+						}
+					case "grant":
+						username := ""
+						for username == "" {
+							fmt.Print("Username (email): ")
+							username = getLine(keyboard)
+						}
+						syncpublicid := ""
+						for syncpublicid == "" {
+							fmt.Print("Sync point ID: ")
+							syncpublicid = getLine(keyboard)
+						}
+						err = rpcDeleteGrant(wnet, username, syncpublicid)
+						if err != nil {
+							if verbose {
+								fmt.Println("Could not add grant")
+							}
+							fmt.Println(err)
+						}
+					default:
+						fmt.Println("Delete: " + `"` + params[1] + `"` + " not found.")
+					}
+				}
+			case "reset":
+				if len(params) == 1 {
+					fmt.Println("Reset what?")
+					fmt.Println("    user password -- reset user password")
+				} else {
+					switch params[1] {
+					case "user":
+						if len(params) == 2 {
+							fmt.Println("Reset user what?")
+							fmt.Println("    password -- reset user password")
+						} else {
+							switch params[2] {
+							case "password":
+								fmt.Print("Username (email): ")
+								username := getLine(keyboard)
+								if verbose {
+									fmt.Println("The username you entered is:", username)
+								}
+								password, err := rpcResetUserPassword(wnet, username)
+								if err != nil {
+									fmt.Println(err)
+								} else {
+									fmt.Println("New password:")
+									fmt.Println(password)
+									localUsername := getValue(db, "username", "")
+									if verbose {
+										fmt.Println("username =", localUsername)
+									}
+									if username == localUsername {
+										yes := getYesNo(keyboard, "Set as password for this client? (y/n) ")
+										if yes {
+											samecommon.SetNameValuePair(db, "password", password)
+											if err != nil {
+												fmt.Println(err)
+											} else {
+												if verbose {
+													fmt.Println("password set to", password)
+												}
+											}
+										}
+									}
+								}
+							default:
+								fmt.Println("Reset user: " + `"` + params[2] + `"` + " not found.")
+							}
+						}
+					default:
+						fmt.Println("Reset : " + `"` + params[1] + `"` + " not found.")
+					}
+				}
+			case "repair":
+				if len(params) == 1 {
+					fmt.Println("repair what?")
+					fmt.Println("    upload hashes -- set the file hashes on the server to an upload from the local system")
+				} else {
+					switch params[1] {
+					case "upload":
+						if len(params) == 2 {
+							fmt.Println("repair upload what?")
+							fmt.Println("    hashes -- set the file hashes on the server to an upload from the local system")
+						} else {
+							switch params[2] {
+							case "hashes":
+								fmt.Println("This operation will overwrite all the hashes on the server to a copy of the")
+								fmt.Println("local file hashes. This should only be done to repair a damaged installation or")
+								fmt.Println("during an upgrade operation. If doing an upgrade, you must make sure all clients")
+								fmt.Println("are fully synchronized before upgrading the software of either clients or")
+								fmt.Println("servers and before performing this operation. This operation should never be")
+								yes := getYesNo(keyboard, "used as part of day-to-day operation. Are you sure you wish to continue? (y/n) ")
+								if yes {
+									if verbose {
+										fmt.Println("Recalculating all file hashes.")
+									}
+									recalculateAllFileHashes(verbose, db, rootPath)
+									if verbose {
+										fmt.Println("All file hashes recalculated.")
+									}
+									if verbose {
+										fmt.Println("Obtaining server time offset.")
+									}
+									serverTimeOffset, err := getServerTimeOffset(wnet)
+									if err != nil {
+										fmt.Fprintln(os.Stderr, err)
+									} else {
+										if verbose {
+											fmt.Println("Uploading all file hashes to the server.")
+										}
+										syncPointID := getValue(db, "syncpointid", "")
+										if verbose {
+											fmt.Println("Sync point ID:", syncPointID)
+										}
+										err = rpcUploadAllHashes(verbose, db, wnet, syncPointID, serverTimeOffset)
+										if err != nil {
+											fmt.Fprintln(os.Stderr, err)
+										} else {
+											if verbose {
+												fmt.Println("All file hashes uploaded.")
+											}
+										}
+									}
+								}
+							default:
+								fmt.Println("repair upload: " + `"` + params[2] + `"` + " not found.")
+							}
+						}
+					default:
+						fmt.Println("repair: " + `"` + params[1] + `"` + " not found.")
+					}
+				}
+			case "local":
+				if len(params) == 1 {
+					fmt.Println("local what?")
+					fmt.Println("    show config -- show configuration on local machine")
+					fmt.Println("    repair hashes -- rescan local system and recalculate all hashes")
+				} else {
+					switch params[1] {
+					case "show":
+						if len(params) == 2 {
+							fmt.Println("local show what?")
+							fmt.Println("    config -- show current configuration")
+						} else {
+							switch params[2] {
+							case "config":
+								showConfiguration(db, verbose)
+							default:
+								fmt.Println("local show: " + `"` + params[2] + `"` + " not found.")
+							}
+						}
+					case "repair":
+						if len(params) == 2 {
+							fmt.Println("local repair what?")
+							fmt.Println("    hashes -- rescan local system and recalculate all hashes")
+						} else {
+							switch params[2] {
+							case "hashes":
+								fmt.Println("This function to rescan all hashes is a repair function and should only be used")
+								fmt.Println("as part of repairing or upgrading a samesync installation. It should not be")
+								yes := getYesNo(keyboard, "used as part of day-to-day operation. Are you sure you wish to continue? (y/n) ")
+								if yes {
+									if verbose {
+										fmt.Println("Recalculating all file hashes.")
+									}
+									recalculateAllFileHashes(verbose, db, rootPath)
+									if verbose {
+										fmt.Println("All file hashes recalculated.")
+									}
+								}
+							default:
+								fmt.Println("local recalc: " + `"` + params[2] + `"` + " not found.")
+							}
+						}
+					default:
+						fmt.Println("local: " + `"` + params[1] + `"` + " not found.")
+					}
+				}
+			case "help":
+				fmt.Println("list")
+				fmt.Println("    users -- list users")
+				fmt.Println("    syncpoints -- list sync points")
+				fmt.Println("    grants -- list access grants of users to sync points")
+				fmt.Println("add")
+				fmt.Println("    user -- add user")
+				fmt.Println("    syncpoint -- add sync point on server")
+				fmt.Println("    grant -- grant a user access to a sync point")
+				fmt.Println("del")
+				fmt.Println("    user -- delete user")
+				fmt.Println("    syncpoint -- delete sync point from server")
+				fmt.Println("    grant -- revoke a user's access to a sync point")
+				fmt.Println("reset")
+				fmt.Println("    user")
+				fmt.Println("        password -- reset user password")
+				fmt.Println("repair")
+				fmt.Println("    upload")
+				fmt.Println("        hashes -- set the file hashes on the server to an upload from the local system")
+				fmt.Println("local")
+				fmt.Println("    show")
+				fmt.Println("        config -- show local machine current configuration")
+				fmt.Println("    repair")
+				fmt.Println("        hashes -- rescan local system and recalculate all hashes")
+				fmt.Println("help -- this message")
+				fmt.Println("quit -- exit program")
+			case "quit":
+				return
+			default:
+				if params[0] != "" {
+					fmt.Println("Command " + `"` + params[0] + `"` + " not found.")
+				}
+			}
+		}
 	}
 }
 
@@ -1890,7 +2049,7 @@ func main() {
 	showEndToEndKeys := *xflag
 	runForever := *zflag
 	if verbose {
-		fmt.Println("same version 0.4.0")
+		fmt.Println("same version 0.4.6")
 		fmt.Println("Command line flags:")
 		fmt.Println("    Initialize mode:", onOff(initialize))
 		fmt.Println("    Configure mode:", onOff(configure))
@@ -2008,7 +2167,7 @@ func main() {
 				}
 			}
 		}
-		fmt.Print("Email: ")
+		fmt.Print("Username (email): ")
 		username := getLine(keyboard)
 		// fmt.Scanln(&username)
 		if username != "" {
@@ -2135,7 +2294,7 @@ func main() {
 	}
 	username := getValue(db, "username", "")
 	if verbose {
-		fmt.Println("Email:", username)
+		fmt.Println("Username (email):", username)
 	}
 	password := getValue(db, "password", "")
 	if verbose {
@@ -2156,7 +2315,7 @@ func main() {
 	if (server == "") || (port == 0) || (username == "") || (password == "") || (syncPointID == "") {
 		fmt.Println("Server and sync point information is not set up.")
 		fmt.Println("Use same -c to configure.")
-		fmt.Println("Use same -l to list current configuration.")
+		fmt.Println("Use same -s to show current configuration.")
 		return
 	}
 	serverSymKeyStr := getValue(db, "serversymkey", "")
@@ -2184,34 +2343,32 @@ func main() {
 		defer wnet.Close()
 		if err != nil {
 			fmt.Println(err)
+			if adminMode {
+				// We are allowed to use the admin mode even if we can't connect to the server.
+				// But we give it "nil" for wnet so it knows we're not connected.
+				doAdminMode(nil, db, rootPath, verbose)
+			}
 			return
 		}
 		if verbose {
 			fmt.Println("Connected to server.")
 		}
 		if adminMode {
-			doAdminMode(wnet, db, verbose)
+			doAdminMode(wnet, db, rootPath, verbose)
 			return
 		}
-		localTime1 := getLocalTime()
-		var remoteTime int64
-		remoteTime, err = rpcGetTime(wnet)
+		serverTimeOffset, err := getServerTimeOffset(wnet)
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
-		localTime2 := getLocalTime()
-		serverTimeOffset := remoteTime - (localTime1 + ((localTime2 - localTime1) >> 1))
 		if verbose {
 			fmt.Println("Difference between server time and local time:", serverTimeOffset, "nanoseconds")
 		}
 		// sendFile("/Users/waynerad/Documents/flushdns.txt", wnet, serverTimeOffset)
-		errmsg, err := rpcLogin(wnet, username, password)
+		err = rpcLogin(wnet, username, password)
 		if err != nil {
-			fmt.Println("Login failed:", err)
-		}
-		if errmsg != "" {
-			fmt.Println("Login failed:", errmsg)
+			fmt.Fprintln(os.Stderr, "Login failed:", err)
 			return
 		}
 		if verbose {
@@ -2225,6 +2382,7 @@ func main() {
 		if verbose {
 			fmt.Println("Scanning local tree.")
 		}
+
 		localTree, err = getDirectoryTree(verbose, path, localTree, false)
 		checkError(err)
 		sortSlice.theSlice = localTree
@@ -2236,7 +2394,8 @@ func main() {
 		if verbose {
 			fmt.Println("Calculating file hashes")
 		}
-		putTreeInTableAndFillInHashesThatNeedToBeUpdated(verbose, db, localTree, basePath, true)
+		putTreeInTableAndFillInHashesThatNeedToBeUpdated(verbose, db, localTree, basePath)
+
 		// At this point, we have to throw away our tree and get a new
 		// one from the DB because otherwise we have a tree without
 		// deleted files. We have to track the deleted files because

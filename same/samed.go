@@ -1673,6 +1673,79 @@ func resetUserPassword(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth
 	return password, err
 }
 
+// This is a special function that should only be invoked from admin mode on the
+// client and should only be needed when upgrading between incompatible
+// versions or repairing things when things have gone horribly wrong (which
+// should never happen). What it does is erase the complete set of hashes on the
+// server and replace them in their entirety with a new set from the client.
+func uploadAllHashes(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *samecommon.AuthInfo, syncpublicid string, filepath []string, modtime []int64, filehash []string) error {
+	if verbose {
+		fmt.Println("Repair mode: Uploading all file hashes.")
+	}
+	cmd := "SELECT syncptid FROM syncpoint WHERE publicid = ?;"
+	stmtSel, err := db.Prepare(cmd)
+	if err != nil {
+		return errors.New("uploadAllHashes: " + err.Error())
+	}
+	rows, err := stmtSel.Query(syncpublicid)
+	if err != nil {
+		return errors.New("uploadAllHashes: " + err.Error())
+	}
+	defer rows.Close()
+	var syncptid int64
+	syncptid = 0
+	for rows.Next() {
+		err = rows.Scan(&syncptid)
+		if err != nil {
+			return errors.New("uploadAllHashes: " + err.Error())
+		}
+	}
+	if syncptid == 0 {
+		return errors.New("uploadAllHashes: Sync point " + `"` + syncpublicid + `"` + " does not exist.")
+	}
+	if verbose {
+		fmt.Println("    Sync point with public id: ", syncpublicid, "found, ID =", syncptid)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	cmd = "DELETE FROM fileinfo WHERE syncptid = ?;"
+	stmtDel, err := tx.Prepare(cmd)
+	_, err = stmtDel.Exec(syncptid)
+	if err != nil {
+		return errors.New("uploadAllHashes: " + err.Error())
+	}
+	if verbose {
+		fmt.Println("    All existing file info records cleared.")
+	}
+	numFiles := len(filepath)
+	if verbose {
+		fmt.Println("    Number of files is:", numFiles)
+	}
+	cmd = "INSERT INTO fileinfo (syncptid, filepath, modtime, filehash, reupneeded) VALUES (?, ?, ?, ?, 0);"
+	stmtIns, err := tx.Prepare(cmd)
+	for ii := 0; ii < numFiles; ii++ {
+		if verbose {
+			fmt.Println("    Adding:", filepath[ii], "mod time", modtime[ii], "file hash", filehash[ii])
+		}
+		_, err = stmtIns.Exec(syncptid, filepath[ii], modtime[ii], filehash[ii])
+		if err != nil {
+			err2 := tx.Rollback()
+			if err2 != nil {
+				return err2
+			} else {
+				return err
+			}
+		}
+	}
+	err = tx.Commit()
+	if err != nil {
+		return errors.New("uploadAllHashes: " + err.Error())
+	}
+	return nil
+}
+
 // ----------------------------------------------------------------
 // End of functions callable remotely
 // ----------------------------------------------------------------
@@ -2005,6 +2078,36 @@ func unmResetUserPassword(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection
 	return wrpc.SendReplyScalarString("ResetUserPassword", version, password, errorToString(err), wnet)
 }
 
+func unmUploadAllHashes(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *samecommon.AuthInfo, verbose bool) error {
+	if version != 0 {
+		return errors.New("UploadAllHashes: Version number mismatch.")
+	}
+	syncpublicid, err := rpc.GetString(0, 0, 0)
+	if err != nil {
+		return err
+	}
+	numRows := rpc.GetNumRows(1)
+	filepath := make([]string, numRows)
+	modtime := make([]int64, numRows)
+	filehash := make([]string, numRows)
+	for ii := 0; ii < numRows; ii++ {
+		filepath[ii], err = rpc.GetString(1, ii, 0)
+		if err != nil {
+			return err
+		}
+		modtime[ii], err = rpc.GetInt(1, ii, 1)
+		if err != nil {
+			return err
+		}
+		filehash[ii], err = rpc.GetString(1, ii, 2)
+		if err != nil {
+			return err
+		}
+	}
+	err = uploadAllHashes(verbose, db, wnet, auth, syncpublicid, filepath, modtime, filehash)
+	return wrpc.SendReplyVoid("UploadAllHashes", version, errorToString(err), wnet)
+}
+
 // ----------------------------------------------------------------
 // end of unmarshallers
 // ----------------------------------------------------------------
@@ -2056,6 +2159,8 @@ func dispatch(fcname string, version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnect
 		return unmMarkFileDeleted(version, rpc, wnet, db, auth, verbose)
 	case "ResetUserPassword":
 		return unmResetUserPassword(version, rpc, wnet, db, auth, verbose)
+	case "UploadAllHashes":
+		return unmUploadAllHashes(version, rpc, wnet, db, auth, verbose)
 	default:
 		if verbose {
 			fmt.Println("Dispatch: ", fcname, "not found.")
@@ -2128,7 +2233,7 @@ func main() {
 	showKeys := *kflag
 	createAdmin := *aflag
 	if verbose {
-		fmt.Println("samed version 0.4.0")
+		fmt.Println("samed version 0.4.6")
 		fmt.Println("Flags:")
 		fmt.Println("    Generate key mode:", onOff(generateKeys))
 		fmt.Println("    Initialize:", onOff(initialize))
