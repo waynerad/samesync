@@ -286,7 +286,7 @@ func (self *WNetConnection) SetKeys(symmetricKey []byte, hmacKey []byte) error {
 	self.ivOutgoing = make([]byte, aes.BlockSize)
 	_, err = rand.Read(self.ivOutgoing)
 	if err != nil {
-		panic(err)
+		return err
 	}
 	self.ivSent = false
 	self.cipherstreamOut = cipher.NewOFB(block, self.ivOutgoing)
@@ -1081,6 +1081,9 @@ func SendReplyVoid(funcname string, version int, errmsg string, wnet IWNetConnec
 
 // Helper functions to speed things up -- Client Side
 
+// StandardReply is used inside all the helper functions for handling replies
+// (as well as can be used directly). Handles any RPC callback where the
+// function name is the same as the function called + "Reply"
 func StandardReply(wnet IWNetConnection, fcname string) (IWRPC, error) {
 	replmsg, err := wnet.NextMessage()
 	if err != nil {
@@ -1103,32 +1106,64 @@ func StandardReply(wnet IWNetConnection, fcname string) (IWRPC, error) {
 	return reply, nil
 }
 
-func StandardStringReply(wnet IWNetConnection, fcname string) (string, string, error) {
+// Use this function if you are expecting a single string value back as your
+// reply to an RPC call.
+func StandardStringReply(wnet IWNetConnection, fcname string) (string, error) {
 	reply, err := StandardReply(wnet, fcname)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	result, err := reply.GetString(0, 0, 0)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	errmsg, err := reply.GetString(0, 0, 1)
 	if err != nil {
-		return result, "", err
+		return result, err
 	}
-	return result, errmsg, nil
+	if errmsg != "" {
+		return result, errors.New(errmsg)
+	}
+	return result, nil
 }
 
-func StandardVoidReply(wnet IWNetConnection, fcname string) (string, error) {
+// Use this function if you are expecting a single int value back as your
+// reply to an RPC call.
+func StandardIntReply(wnet IWNetConnection, fcname string) (int64, error) {
 	reply, err := StandardReply(wnet, fcname)
 	if err != nil {
-		return "", err
+		return 0, err
+	}
+	result, err := reply.GetInt(0, 0, 0)
+	if err != nil {
+		return 0, err
+	}
+	errmsg, err := reply.GetString(0, 0, 1)
+	if err != nil {
+		return result, err
+	}
+	if errmsg != "" {
+		return result, errors.New(errmsg)
+	}
+	return result, nil
+}
+
+// Void means no return value is expected. However, we still check for errors.
+// An error could have happened on the other end, or there could have been an
+// error in the RPC system.
+func StandardVoidReply(wnet IWNetConnection, fcname string) error {
+	reply, err := StandardReply(wnet, fcname)
+	if err != nil {
+		return err
 	}
 	errmsg, err := reply.GetString(0, 0, 0)
 	if err != nil {
-		return "", err
+		return err
 	}
-	return errmsg, nil
+	if errmsg != "" {
+		return errors.New(errmsg)
+	}
+	return nil
 }
 
 // Helper functions for debugging
