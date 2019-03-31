@@ -184,7 +184,7 @@ func initializeServerTables(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	cmd = "CREATE TABLE fileinfo (fileid INTEGER PRIMARY KEY AUTOINCREMENT, syncptid INTEGER NOT NULL, filepath TEXT NOT NULL, modtime INTEGER NOT NULL, filehash TEXT NOT NULL, reupneeded INTEGER NOT NULL);"
+	cmd = "CREATE TABLE fileinfo (fileid INTEGER PRIMARY KEY AUTOINCREMENT, syncptid INTEGER NOT NULL, filepath TEXT NOT NULL, modtime INTEGER NOT NULL, filehash TEXT NOT NULL, reupneeded INTEGER NOT NULL, localstorage TEXT NOT NULL);"
 	stmtCreate, err = tx.Prepare(cmd)
 	if err != nil {
 		return err
@@ -373,7 +373,10 @@ func determineAccessForSyncPoint(verbose bool, db *sql.DB, auth *samecommon.Auth
 	return syncptid, path, errors.New("Access denied. No access grant for requested access:" + samecommon.AccessFlagsToString(accessRequested))
 }
 
-func stashFileInfo(db *sql.DB, syncptid int64, filepath string, modtime int64, filehash string) error {
+func stashFileInfo(verbose bool, db *sql.DB, syncptid int64, filepath string, modtime int64, filehash string, localstorage string) error {
+	if verbose {
+		fmt.Println("For file", filepath, "stashing hash", filehash, "modtime", modtime, "in local storage", localstorage)
+	}
 	filepath = samecommon.MakePathSeparatorsStandard(filepath)
 	tx, err := db.Begin()
 	if err != nil {
@@ -398,19 +401,19 @@ func stashFileInfo(db *sql.DB, syncptid int64, filepath string, modtime int64, f
 		}
 	}
 	if fileid == 0 {
-		cmd = "INSERT INTO fileinfo (syncptid, filepath, modtime, filehash, reupneeded) VALUES (?, ?, ?, ?, 0);"
+		cmd = "INSERT INTO fileinfo (syncptid, filepath, modtime, filehash, reupneeded, localstorage) VALUES (?, ?, ?, ?, 0, ?);"
 		stmtIns, err := tx.Prepare(cmd)
 		if err != nil {
 			return err
 		}
-		_, err = stmtIns.Exec(syncptid, filepath, modtime, filehash)
+		_, err = stmtIns.Exec(syncptid, filepath, modtime, filehash, localstorage)
 		if err != nil {
 			return err
 		}
 	} else {
-		cmd = "UPDATE fileinfo SET modtime = ?, filehash = ?, reupneeded = 0 WHERE fileid = ?;"
+		cmd = "UPDATE fileinfo SET modtime = ?, filehash = ?, reupneeded = 0, localstorage = ? WHERE fileid = ?;"
 		stmtUpd, err := tx.Prepare(cmd)
-		_, err = stmtUpd.Exec(modtime, filehash, fileid)
+		_, err = stmtUpd.Exec(modtime, filehash, localstorage, fileid)
 		if err != nil {
 			return err
 		}
@@ -419,32 +422,33 @@ func stashFileInfo(db *sql.DB, syncptid int64, filepath string, modtime int64, f
 	return err
 }
 
-func getFileInfo(db *sql.DB, syncptid int64, filepath string) (int64, int64, string, error) {
+func getFileInfo(db *sql.DB, syncptid int64, filepath string) (int64, int64, string, string, error) {
 	filepath = samecommon.MakePathSeparatorsStandard(filepath)
-	cmd := "SELECT fileid, modtime, filehash FROM fileinfo WHERE (syncptid = ?) AND (filepath = ?);"
+	cmd := "SELECT fileid, modtime, filehash, localstorage FROM fileinfo WHERE (syncptid = ?) AND (filepath = ?);"
 	stmtSel, err := db.Prepare(cmd)
 	if err != nil {
-		return 0, 0, "", err
+		return 0, 0, "", "", err
 	}
 	rows, err := stmtSel.Query(syncptid, filepath)
 	if err != nil {
-		return 0, 0, "", err
+		return 0, 0, "", "", err
 	}
 	defer rows.Close()
 	var fileid int64
 	fileid = 0
 	var modtime int64
 	var filehash string
+	var localstorage string
 	for rows.Next() {
-		err = rows.Scan(&fileid, &modtime, &filehash)
+		err = rows.Scan(&fileid, &modtime, &filehash, &localstorage)
 		if err != nil {
-			return 0, 0, "", err
+			return 0, 0, "", "", err
 		}
 	}
 	if fileid == 0 {
-		return 0, 0, "", errors.New("Could not find file: " + `"` + filepath + `"`)
+		return 0, 0, "", "", errors.New("Could not find file: " + `"` + filepath + `"`)
 	}
-	return fileid, modtime, filehash, nil
+	return fileid, modtime, filehash, localstorage, nil
 }
 
 // need this function to handle nils
@@ -468,6 +472,26 @@ func markFileAsReuploadneeded(db *sql.DB, fileid int64) error {
 	}
 	err = tx.Commit()
 	return err
+}
+
+func calculateFilenameHash(filenameordirectory string) []byte {
+	sum := sha256.Sum256([]byte(filenameordirectory))
+	result := make([]byte, 32)
+	// copy(result,sum) -- gives error second argument to copy should be slice or string; have [32]byte
+	for ii := 0; ii < 32; ii++ {
+		result[ii] = sum[ii]
+	}
+	return result
+}
+
+func convertFilePathToLocalStoragePath(filepath string) string {
+	pieces := strings.Split(filepath, "/")
+	lnp := len(pieces)
+	result := ""
+	for ii := 1; ii < lnp; ii++ {
+		result += "/" + hex.EncodeToString(calculateFilenameHash(pieces[ii]))
+	}
+	return result
 }
 
 // ----------------------------------------------------------------
@@ -543,20 +567,25 @@ func receiveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *same
 	// Step 4: Rename the file to slot it in place, replacing the
 	// existing file, which we have preserved until now in case
 	// anything went wrong.
-	err = os.Rename(localpath+string(os.PathSeparator)+"temp.temp", localpath+samecommon.MakePathSeparatorsForThisOS(filepath))
+	// err = os.Rename(localpath+string(os.PathSeparator)+"temp.temp", localpath+samecommon.MakePathSeparatorsForThisOS(filepath))
+	localstorage := convertFilePathToLocalStoragePath(filepath)
+	if verbose {
+		fmt.Println("    Local storage:", localstorage)
+	}
+	err = os.Rename(localpath+string(os.PathSeparator)+"temp.temp", localpath+samecommon.MakePathSeparatorsForThisOS(localstorage))
 	if err != nil {
-		mkerr := samecommon.MakePathForFile(localpath + samecommon.MakePathSeparatorsForThisOS(filepath))
+		mkerr := samecommon.MakePathForFile(localpath + samecommon.MakePathSeparatorsForThisOS(localstorage))
 		if mkerr != nil {
 			return "", errors.New("receiveFile: make path: " + err.Error())
 		}
-		mverr := os.Rename(localpath+string(os.PathSeparator)+"temp.temp", localpath+samecommon.MakePathSeparatorsForThisOS(filepath))
+		mverr := os.Rename(localpath+string(os.PathSeparator)+"temp.temp", localpath+samecommon.MakePathSeparatorsForThisOS(localstorage))
 		if mverr != nil {
 			return "", errors.New("receiveFile: rename: " + err.Error())
 		}
 	}
 	//
 	// Step 5: Stash all the info about the file in our server database
-	err = stashFileInfo(db, syncptid, filepath, modtime, filehash)
+	err = stashFileInfo(verbose, db, syncptid, filepath, modtime, filehash, localstorage)
 	if err != nil {
 		return "", errors.New("receiveFile: stash file info: " + err.Error())
 	}
@@ -1405,18 +1434,20 @@ func sendFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *samecom
 	if err != nil {
 		return "", err
 	}
-	fileid, modtime, ourFileHash, err := getFileInfo(db, syncptid, filepath)
+	fileid, modtime, ourFileHash, ourLocalStorage, err := getFileInfo(db, syncptid, filepath)
 	if err != nil {
 		return "", err
 	}
 	if verbose {
 		fmt.Println("    Modification time:", modtime)
 		fmt.Println("    File hash:", filehash)
+		fmt.Println("    Local storage:", ourLocalStorage)
 	}
 	if ourFileHash != filehash {
 		return "", errors.New("SendFile: hash requested does not match server's hash of that file. File:" + `"` + filepath + `"` + ".")
 	}
-	localfilepath := localpath + samecommon.MakePathSeparatorsForThisOS(filepath)
+	// localfilepath := localpath + samecommon.MakePathSeparatorsForThisOS(filepath)
+	localfilepath := localpath + samecommon.MakePathSeparatorsForThisOS(ourLocalStorage)
 	info, err := os.Stat(localfilepath)
 	noexist := false
 	if err != nil {
@@ -1576,7 +1607,7 @@ func markFileDeleted(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *
 	if err != nil {
 		return err
 	}
-	fileid, _, ourFileHash, err := getFileInfo(db, syncptid, filepath)
+	fileid, _, ourFileHash, localstorage, err := getFileInfo(db, syncptid, filepath)
 	if err != nil {
 		return err
 	}
@@ -1585,9 +1616,10 @@ func markFileDeleted(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *
 		fmt.Println("    Local hash:", filehash)
 	}
 	if ourFileHash != filehash {
-		return errors.New("MarkFileDeleted: hashes do not match. To protect against accidental deletions, only the most recent version of the file (as known to the server) can be deleted. Use same -u to undelete deleted files with the most recent versions. File:" + `"` + filepath + `"` + ".")
+		return errors.New("MarkFileDeleted: hashes do not match. To protect against accidental deletions, only the most recent version of the file (as known to the server) can be deleted. File:" + `"` + filepath + `"` + ".")
 	}
-	localfilepath := localpath + string(os.PathSeparator) + samecommon.MakePathSeparatorsForThisOS(filepath)
+	// localfilepath := localpath + string(os.PathSeparator) + samecommon.MakePathSeparatorsForThisOS(filepath)
+	localfilepath := localpath + string(os.PathSeparator) + localstorage
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -1603,6 +1635,9 @@ func markFileDeleted(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *
 		fmt.Println("    File marked as deleted in our DB. Attempting to delete local copy of the file:", localfilepath)
 	}
 	err = os.Remove(localfilepath)
+	// We're actually going to ignore the error if one happens -- if the
+	// file already doesn't exist, we don't care, and if there's some other
+	// reason we can't delete it, there's nothing we can do about it anyway.
 	if verbose {
 		fmt.Println("Local file deleted. Deletion complete")
 	}
@@ -1723,7 +1758,7 @@ func uploadAllHashes(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *
 	if verbose {
 		fmt.Println("    Number of files is:", numFiles)
 	}
-	cmd = "INSERT INTO fileinfo (syncptid, filepath, modtime, filehash, reupneeded) VALUES (?, ?, ?, ?, 0);"
+	cmd = "INSERT INTO fileinfo (syncptid, filepath, modtime, filehash, reupneeded, localstorage) VALUES (?, ?, ?, ?, 0, '');"
 	stmtIns, err := tx.Prepare(cmd)
 	for ii := 0; ii < numFiles; ii++ {
 		if verbose {
@@ -2233,7 +2268,7 @@ func main() {
 	showKeys := *kflag
 	createAdmin := *aflag
 	if verbose {
-		fmt.Println("samed version 0.4.6")
+		fmt.Println("samed version 0.4.8")
 		fmt.Println("Flags:")
 		fmt.Println("    Generate key mode:", onOff(generateKeys))
 		fmt.Println("    Initialize:", onOff(initialize))
