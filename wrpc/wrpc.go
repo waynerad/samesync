@@ -393,11 +393,13 @@ func (self *WNetConnection) DevelopMessage() ([]byte, error) {
 	messageLen := int(DecodeUint(llTemp))
 	//
 	// allocate messageLen bytes to receive the message (+ extra for the signature)
+	//
 	plaintext := make([]byte, messageLen)
 	stream.XORKeyStream(plaintext, self.bitsOnTheWire[position:position+messageLen])
 	position += messageLen
 	//
 	// check the signature
+	//
 	hasher := hmac.New(sha256.New, self.hmacKey)
 	hasher.Write(self.bitsOnTheWire[aes.BlockSize:position])
 	expectedMAC := hasher.Sum(nil)
@@ -420,8 +422,8 @@ func (self *WNetConnection) DevelopConnectionMessage(conn net.Conn) ([]byte, err
 	// Function is aggressive about closing connections if anything goes
 	// wrong to discourage hackers.
 	//
-	// step 1: read AES initialization vector
-
+	// Step 1: read AES initialization vector
+	//
 	if !self.ivReceived {
 		self.ivIncoming = make([]byte, aes.BlockSize)
 
@@ -449,7 +451,8 @@ func (self *WNetConnection) DevelopConnectionMessage(conn net.Conn) ([]byte, err
 	}
 
 	//
-	// step 2: read the EEEE check and length byte
+	// Step 2: read the EEEE check and length byte
+	//
 	cipherl1 := make([]byte, 5)
 
 	n, err := conn.Read(cipherl1)
@@ -516,7 +519,8 @@ func (self *WNetConnection) DevelopConnectionMessage(conn net.Conn) ([]byte, err
 	copy(llTemp[1:], lbytes)
 	messageLen := int(DecodeUint(llTemp))
 	//
-	// step 3: allocate messageLen bytes to receive the message (+ extra for the signature)
+	// Step 3: allocate messageLen bytes to receive the message (+ extra for the signature)
+	//
 	ciphertext := make([]byte, 5+lli+messageLen)
 	copy(ciphertext, cipherl1)
 	copy(ciphertext[5:], cipherl2)
@@ -550,8 +554,8 @@ func (self *WNetConnection) DevelopConnectionMessage(conn net.Conn) ([]byte, err
 	plaintext := make([]byte, messageLen)
 	self.cipherstreamIn.XORKeyStream(plaintext, ciphertext[contentstart:])
 	//
-	// step 4: check the signature
-
+	// Step 4: check the signature
+	//
 	signature := make([]byte, 32)
 	n, err = conn.Read(signature)
 	if err != nil {
