@@ -1,6 +1,7 @@
 package samecommon
 
 import (
+	"crypto/aes"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -21,7 +22,7 @@ type AuthInfo struct {
 
 type ListUserInfo struct {
 	Username string
-	Role  int
+	Role     int
 }
 
 type ListSyncPointInfo struct {
@@ -30,7 +31,7 @@ type ListSyncPointInfo struct {
 }
 
 type ListGrantInfo struct {
-	Username    string
+	Username string
 	PublicId string
 	Access   int
 }
@@ -58,6 +59,12 @@ func GenerateSHAKey() ([]byte, error) {
 	key := make([]byte, 32)
 	_, err := rand.Read(key)
 	return key, err
+}
+
+func GenerateAESInitializationVector() ([]byte, error) {
+	iv := make([]byte, aes.BlockSize)
+	_, err := rand.Read(iv)
+	return iv, err
 }
 
 func RoleFlagsToString(roleflags int) string {
