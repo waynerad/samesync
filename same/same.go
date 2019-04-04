@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -12,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	_ "github.com/mattn/go-sqlite3"
+	"hash"
 	"io"
 	"os"
 	"samecommon"
@@ -528,7 +530,62 @@ func rpcGetServerTreeForSyncPoint(wnet wrpc.IWNetConnection, syncpublicid string
 	return result, nil
 }
 
-func sendFile(verbose bool, wnet wrpc.IWNetConnection, syncpublicid string, localdir string, localfilepath string, filehash string, serverTimeOffset int64, endToEndEncryption bool, endToEndSymmetricKey []byte, endToEndHmacKey []byte) error {
+func encryptDirectoryPath(filepath string, endToEndIV []byte, endToEndSymmetricKey []byte, endToEndHmacKey []byte) (string, error) {
+	// This function unfortunately blows up short names because it tacks a
+	// digital signature to the end, and then it hex encodes the whole
+	// thing, so filename length + 32 all times 2.
+	ciphertext := make([]byte, 4096)
+	pieces := strings.Split(filepath, "/")
+	lnp := len(pieces)
+	result := ""
+	for ii := 1; ii < lnp; ii++ {
+		block, err := aes.NewCipher(endToEndSymmetricKey)
+		if err != nil {
+			return "", err
+		}
+		dirCipher := cipher.NewOFB(block, endToEndIV)
+		plaintext := []byte(pieces[ii])
+		nn := len(plaintext)
+		dirCipher.XORKeyStream(ciphertext[:nn], plaintext)
+		dirHasher := hmac.New(sha256.New, endToEndHmacKey)
+		dirHasher.Write(ciphertext[:nn])
+		signature := dirHasher.Sum(nil)
+		result += "/" + hex.EncodeToString(ciphertext[:nn]) + hex.EncodeToString(signature)
+	}
+	return result, nil
+}
+
+func decryptDirectoryPath(filepath string, endToEndIV []byte, endToEndSymmetricKey []byte, endToEndHmacKey []byte) (string, error) {
+	plaintext := make([]byte, 4096)
+	pieces := strings.Split(filepath, "/")
+	lnp := len(pieces)
+	result := ""
+	for ii := 1; ii < lnp; ii++ {
+		ciphertext, err := hex.DecodeString(pieces[ii])
+		if err != nil {
+			return "", err
+		}
+		block, err := aes.NewCipher(endToEndSymmetricKey)
+		if err != nil {
+			return "", err
+		}
+		cipher := cipher.NewOFB(block, endToEndIV)
+		// cipher set up
+		nn := len(ciphertext) - 32
+		dirHasher := hmac.New(sha256.New, endToEndHmacKey)
+		dirHasher.Write(ciphertext[:nn])
+		cipher.XORKeyStream(plaintext[:nn], ciphertext[:nn])
+		expectedMAC := dirHasher.Sum(nil)
+		match := hmac.Equal(ciphertext[len(ciphertext)-32:], expectedMAC)
+		if !match {
+			return "", errors.New("decryptDirectoryPath: directory HMAC signature check failed.")
+		}
+		result += "/" + string(plaintext[:nn])
+	}
+	return result, nil
+}
+
+func sendFile(verbose bool, wnet wrpc.IWNetConnection, syncpublicid string, localdir string, localfilepath string, filehash string, serverTimeOffset int64, endToEndEncryption bool, endToEndIV []byte, endToEndSymmetricKey []byte, endToEndHmacKey []byte) error {
 	info, err := os.Stat(localfilepath)
 	if err != nil {
 		return err
@@ -553,10 +610,16 @@ func sendFile(verbose bool, wnet wrpc.IWNetConnection, syncpublicid string, loca
 	//
 	// filename := info.Name()
 	remotefilepath := localfilepath[len(localdir):]
+	if endToEndEncryption {
+		remotefilepath, err = encryptDirectoryPath(remotefilepath, endToEndIV, endToEndSymmetricKey, endToEndHmacKey)
+		if err != nil {
+			return err
+		}
+	}
 	modtime := info.ModTime().UnixNano() + serverTimeOffset
 	filesize := info.Size()
 	if endToEndEncryption {
-		filesize += aes.BlockSize
+		filesize += aes.BlockSize + 32
 	}
 	//
 	msg.StartRow()
@@ -602,16 +665,18 @@ func sendFile(verbose bool, wnet wrpc.IWNetConnection, syncpublicid string, loca
 	// It's gets pushed through the crypto system, so don't worry,
 	// the bits on the wire are still encrypted
 	//
-	buffer := make([]byte, 32768)
+	const bufferSize = 32768
+	buffer := make([]byte, bufferSize)
 	var endToEndIvOutgoing []byte
 	var endToEndIvSent bool
 	var endToEndCipherstreamOut cipher.Stream
 	var endToEndBuffer []byte
+	var endToEndHasher hash.Hash
 	if endToEndEncryption {
 		if verbose {
 			fmt.Println("End-to-end encryption is enabled: transmitting file with end-to-end encryption")
 		}
-		endToEndBuffer = make([]byte, 32768)
+		endToEndBuffer = make([]byte, bufferSize+aes.BlockSize)
 		// Setup here is the same as in wnet.SetKeys
 		// endToEndSymmetricKey = symmetricKey
 		// endToEndHmacKey = hmacKey
@@ -626,10 +691,8 @@ func sendFile(verbose bool, wnet wrpc.IWNetConnection, syncpublicid string, loca
 		}
 		endToEndIvSent = false
 		endToEndCipherstreamOut = cipher.NewOFB(block, endToEndIvOutgoing)
-		fmt.Println("debug key used is", endToEndSymmetricKey)
-		fmt.Println("debug IV used is", endToEndIvOutgoing)
 	}
-	ciphertext := make([]byte, 32768) // allocated here as a memory management optimization
+	ciphertext := make([]byte, bufferSize+aes.BlockSize) // allocated here as a memory management optimization
 	//
 	fh, err := os.Open(samecommon.MakePathSeparatorsForThisOS(localfilepath))
 	if err != nil {
@@ -640,25 +703,33 @@ func sendFile(verbose bool, wnet wrpc.IWNetConnection, syncpublicid string, loca
 		n, err := fh.Read(buffer)
 		if err == nil {
 			if endToEndEncryption {
-				endToEndCipherstreamOut.XORKeyStream(endToEndBuffer[:n], buffer[:n])
 				if endToEndIvSent {
+					endToEndCipherstreamOut.XORKeyStream(endToEndBuffer[:n], buffer[:n])
 					err = wnet.ShoveBytes(endToEndBuffer[:n], ciphertext[:n])
+					if err != nil {
+						return err
+					}
+					endToEndHasher.Write(endToEndBuffer[:n])
 				} else {
-					tempBuffer := make([]byte, 32768+aes.BlockSize) // we only do this once on the message that sends out the IV
-					// Yes, we make the file size 16 bytes larger. The server won't know.
-					offset := copy(tempBuffer, endToEndIvOutgoing)
-					fmt.Println("debug offset", offset)
-					offset += copy(tempBuffer[offset:], endToEndBuffer[:n])
-					fmt.Println("debug offset", offset)
-					fmt.Println("debug len(endToEndIvOutgoing)", len(endToEndIvOutgoing))
-					fmt.Println("debug n", n)
-					fmt.Println("debug tempBuffer[:offset]", tempBuffer[:offset])
-					fmt.Println("debug tempBuffer[:offset+16]", tempBuffer[:offset+16])
-					err = wnet.ShoveBytes(tempBuffer[:offset], ciphertext[:offset])
+					// Yes, we make the file size 16 bytes larger.
+					// (Actually 48 when you include the HMAC signature.)
+					// The server won't know.
+					offset := copy(endToEndBuffer, endToEndIvOutgoing)
+					endToEndCipherstreamOut.XORKeyStream(endToEndBuffer[offset:offset+n], buffer[:n])
+					offset += n
+					err = wnet.ShoveBytes(endToEndBuffer[:offset], ciphertext[:offset])
+					if err != nil {
+						return err
+					}
+					endToEndHasher = hmac.New(sha256.New, endToEndHmacKey)
+					endToEndHasher.Write(endToEndBuffer[:offset])
 					endToEndIvSent = true
 				}
 			} else {
 				err = wnet.ShoveBytes(buffer[:n], ciphertext[:n])
+				if err != nil {
+					return err
+				}
 			}
 			if err != nil {
 				return err
@@ -672,6 +743,10 @@ func sendFile(verbose bool, wnet wrpc.IWNetConnection, syncpublicid string, loca
 		}
 	}
 	fh.Close()
+	if endToEndEncryption {
+		signature := endToEndHasher.Sum(nil)
+		err = wnet.ShoveBytes(signature, ciphertext[:len(signature)])
+	}
 	//
 	// Step 4: Get reply from the remote end that the bytes were
 	// received and the signature checked out
@@ -701,11 +776,24 @@ func sendFile(verbose bool, wnet wrpc.IWNetConnection, syncpublicid string, loca
 	return nil
 }
 
-func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpublicid string, localdir string, localfilepath string, filehash string, serverTimeOffset int64, endToEndEncryption bool, endToEndSymmetricKey []byte, endToEndHmacKey []byte) error {
+func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpublicid string, localdir string, localfilepath string, filehash string, serverTimeOffset int64, endToEndEncryption bool, endToEndIV []byte, endToEndSymmetricKey []byte, endToEndHmacKey []byte) error {
 	if verbose {
 		fmt.Println("Seeking to update file:", localfilepath)
+		fmt.Println("    with file hash:", filehash)
 	}
 	version := 0
+
+	remotefilepath := localfilepath[len(localdir):]
+	if verbose {
+		fmt.Println("    Requesting retrieval of:", remotefilepath)
+	}
+	var err error
+	if endToEndEncryption {
+		remotefilepath, err = encryptDirectoryPath(remotefilepath, endToEndIV, endToEndSymmetricKey, endToEndHmacKey)
+		if err != nil {
+			return err
+		}
+	}
 	//
 	// Step 1: Call SendFile API on remote server, tell them the
 	// name of the file we want
@@ -716,10 +804,6 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 	msg.AddColumn("syncpublicid", wrpc.ColString)
 	msg.AddColumn("filepath", wrpc.ColString)
 	msg.AddColumn("filehash", wrpc.ColString)
-	remotefilepath := localfilepath[len(localdir):]
-	if verbose {
-		fmt.Println("    Requesting retrieval of:", remotefilepath)
-	}
 	msg.StartRow()
 	msg.AddRowColumnString(syncpublicid)
 	msg.AddRowColumnString(remotefilepath)
@@ -736,7 +820,7 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 	if len(replmsg) == 0 {
 		// if message is empty, we assume the server closed the connection.
 		wnet.Close()
-		return errors.New("Connection closed by same server.")
+		return errors.New("retrieveFile: Connection closed by same server.")
 	}
 	reply := wrpc.NewDB()
 	reply.ReceiveDB(replmsg)
@@ -755,7 +839,7 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 			panic(err)
 			return errors.New(reply.GetDBName())
 		}
-		return errors.New(reply.GetDBName() + ": " + errmsg)
+		return errors.New("retrieveFile: " + reply.GetDBName() + ": " + errmsg)
 	}
 	filepath, err := reply.GetString(0, 0, 0)
 	if err != nil {
@@ -774,6 +858,12 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 		return err
 	}
 	modtime -= serverTimeOffset
+	if endToEndEncryption {
+		filepath, err = decryptDirectoryPath(filepath, endToEndIV, endToEndSymmetricKey, endToEndHmacKey)
+		if err != nil {
+			return err
+		}
+	}
 	if verbose {
 		fmt.Println("    File being sent from server:", filepath)
 		fmt.Println("    File size:", filesize)
@@ -781,7 +871,7 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 		fmt.Println("    File hash:", receiveFileHash)
 	}
 	if receiveFileHash != filehash {
-		return errors.New("Received file hash does not match expected file hash.")
+		return errors.New("retrieveFile: Received file hash does not match expected file hash.")
 	}
 	//
 	// Step 3: Send ReceiveFileReply with "GoAheadAndSend"
@@ -806,7 +896,6 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 	var bytesread int64
 	bytesread = 0
 	const bufferSize = 65536
-	// const bufferSize = 32768
 	buffer := make([]byte, bufferSize)
 	ciphertext := make([]byte, bufferSize)
 	var nIn int
@@ -815,16 +904,16 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 	var endToEndIvIncoming []byte
 	var endToEndCipherstreamIn cipher.Stream
 	var endToEndBuffer []byte
+	var endToEndHasher hash.Hash
+	var endToEndActualHmac []byte
+	var endToEndFileSizeMinusHMACSignature int64
 	for bytesread < filesize {
-		fmt.Println("bytesread", bytesread, "filesize", filesize)
 		lrest := filesize - bytesread
 		if lrest > bufferSize {
 			nIn, err = wnet.PullBytes(buffer, ciphertext)
 		} else {
 			nIn, err = wnet.PullBytes(buffer[:lrest], ciphertext[:lrest])
 		}
-		fmt.Println("nIn", nIn)
-		fmt.Println("buffer[:nIn]", buffer[:nIn])
 		if err != nil {
 			return errors.New("receiveFile: " + err.Error())
 		}
@@ -834,7 +923,7 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 					fmt.Println("End-to-end encryption enabled: decrypting received file.")
 				}
 				if len(buffer) < aes.BlockSize {
-					return errors.New("Could only read partial AES256 initialization vector.")
+					return errors.New("retrieveFile: Could only read partial AES256 initialization vector.")
 				}
 				endToEndIvIncoming = make([]byte, aes.BlockSize)
 				copy(endToEndIvIncoming, buffer[:aes.BlockSize])
@@ -844,33 +933,84 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 				}
 				endToEndBuffer = make([]byte, bufferSize)
 				endToEndCipherstreamIn = cipher.NewOFB(block, endToEndIvIncoming)
-
-				fmt.Println("debug key used is", endToEndSymmetricKey)
-				fmt.Println("debug IV used is", endToEndIvIncoming)
-
+				endToEndHasher = hmac.New(sha256.New, endToEndHmacKey)
+				endToEndActualHmac = make([]byte, 0, 32)
 				endToEndCipherstreamIn.XORKeyStream(endToEndBuffer[aes.BlockSize:nIn], buffer[aes.BlockSize:nIn])
-				nOut, err = fhOut.Write(endToEndBuffer[aes.BlockSize:nIn])
-				if (nOut + aes.BlockSize) != nIn {
-					return errors.New("Could not write entire buffer out to file for some unknown reason.")
+				endToEndFileSizeMinusHMACSignature = filesize - 32
+				if int64(nIn) > endToEndFileSizeMinusHMACSignature {
+					// The whole file is in the buffer
+					nOut, err = fhOut.Write(endToEndBuffer[aes.BlockSize:endToEndFileSizeMinusHMACSignature])
+					if err != nil {
+						return errors.New("receiveFile: " + err.Error())
+					}
+					if int64(nOut) != (endToEndFileSizeMinusHMACSignature - aes.BlockSize) {
+						return errors.New("retrieveFile: Could not write entire buffer out to file for some unknown reason (A).")
+					}
+					endToEndHasher.Write(buffer[:endToEndFileSizeMinusHMACSignature])
+					endToEndActualHmac = append(endToEndActualHmac, buffer[endToEndFileSizeMinusHMACSignature:nIn]...)
+				} else {
+					// The buffer just has the first portion of the file
+					nOut, err = fhOut.Write(endToEndBuffer[aes.BlockSize:nIn])
+					if err != nil {
+						return errors.New("receiveFile: " + err.Error())
+					}
+					if nOut != (nIn - aes.BlockSize) {
+						return errors.New("retrieveFile: Could not write entire buffer out to file for some unknown reason (B).")
+					}
+					endToEndHasher.Write(buffer[:nIn])
 				}
 				endToEndIvReceived = true
 			} else {
-				endToEndCipherstreamIn.XORKeyStream(endToEndBuffer[:nIn], buffer[:nIn])
-				nOut, err = fhOut.Write(endToEndBuffer[:nIn])
-				if nOut != nIn {
-					return errors.New("Could not write entire buffer out to file for some unknown reason.")
+				if bytesread >= endToEndFileSizeMinusHMACSignature {
+					// we are in the HMAC signature
+					// capacity should be enough that this append doesn't cause a memory allocation
+					endToEndActualHmac = append(endToEndActualHmac, endToEndBuffer[:nIn]...)
+				} else {
+					if (bytesread + int64(nIn)) > endToEndFileSizeMinusHMACSignature {
+						// The buffer has the end of the file and the beginning or all of the HMAC signature
+						stopPoint := endToEndFileSizeMinusHMACSignature - bytesread
+						endToEndCipherstreamIn.XORKeyStream(endToEndBuffer[:stopPoint], buffer[:stopPoint])
+						nOut, err = fhOut.Write(endToEndBuffer[:stopPoint])
+						if err != nil {
+							return errors.New("receiveFile: " + err.Error())
+						}
+						if int64(nOut) != stopPoint {
+							return errors.New("retrieveFile: Could not write entire buffer out to file for some unknown reason (D).")
+						}
+						endToEndHasher.Write(buffer[:stopPoint])
+						endToEndActualHmac = append(endToEndActualHmac, buffer[stopPoint:nIn]...)
+					} else {
+						// The buffer just has a piece of the file, we haven't reached the end.
+						endToEndCipherstreamIn.XORKeyStream(endToEndBuffer[:nIn], buffer[:nIn])
+						nOut, err = fhOut.Write(endToEndBuffer[:nIn])
+						if err != nil {
+							return errors.New("receiveFile: " + err.Error())
+						}
+						if nOut != nIn {
+							return errors.New("retrieveFile: Could not write entire buffer out to file for some unknown reason (E).")
+						}
+						endToEndHasher.Write(buffer[:nIn])
+					}
 				}
 			}
 		} else {
+			// not using end-to-end encryption
 			nOut, err = fhOut.Write(buffer[:nIn])
+			if err != nil {
+				return errors.New("receiveFile: " + err.Error())
+			}
 			if nOut != nIn {
-				return errors.New("Could not write entire buffer out to file for some unknown reason.")
+				return errors.New("retrieveFile: Could not write entire buffer out to file for some unknown reason (F).")
 			}
 		}
-		if err != nil {
-			return errors.New("receiveFile: " + err.Error())
-		}
 		bytesread += int64(nIn)
+	}
+	if endToEndEncryption {
+		expectedMAC := endToEndHasher.Sum(nil)
+		match := hmac.Equal(endToEndActualHmac, expectedMAC)
+		if !match {
+			return errors.New("retrieveFile: End-to-end encryption HMAC signature check failed.")
+		}
 	}
 	fhOut.Close()
 	if verbose {
@@ -883,7 +1023,7 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 	//
 	newFileHash := calcHash(localdir + string(os.PathSeparator) + tempFileName)
 	if newFileHash != receiveFileHash {
-		return errors.New("Hash verification failed for: " + localdir + string(os.PathSeparator) + tempFileName)
+		return errors.New("retrieveFile: Hash verification failed for: " + localdir + string(os.PathSeparator) + tempFileName)
 	}
 	//
 	// Step 6: Now that we have the bytes of the file, rename the
@@ -996,7 +1136,7 @@ func rpcResetUserPassword(wnet wrpc.IWNetConnection, username string) (string, e
 	return password, err
 }
 
-func rpcUploadAllHashes(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpublicid string, serverTimeOffset int64) error {
+func rpcUploadAllHashes(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpublicid string, serverTimeOffset int64, endToEndEncryption bool, endToEndIV []byte, endToEndSymmetricKey []byte, endToEndHmacKey []byte) error {
 	if wnet == nil {
 		return errors.New("Cannot upload hashes: not connected to server.")
 	}
@@ -1025,6 +1165,12 @@ func rpcUploadAllHashes(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syn
 		rpc.StartRow()
 		if verbose {
 			fmt.Println("    adding file", filepath, "mod time", modtime+serverTimeOffset, "file hash", filehash)
+		}
+		if endToEndEncryption {
+			filepath, err = encryptDirectoryPath(filepath, endToEndIV, endToEndSymmetricKey, endToEndHmacKey)
+			if err != nil {
+				return err
+			}
 		}
 		rpc.AddRowColumnString(filepath)
 		rpc.AddRowColumnInt(modtime + serverTimeOffset)
@@ -1180,37 +1326,41 @@ func showConfiguration(db *sql.DB, verbose bool) {
 	syncPointID := getValue(db, "syncpointid", "")
 	fmt.Println("Server:", server)
 	fmt.Println("Port:", port)
-	serverSymKey := getValue(db, "serversymkey", "")
-	if serverSymKey != "" {
-		fmt.Println("Server key (next two lines):")
-		fmt.Println(serverSymKey)
-	}
-	serverHmacKey := getValue(db, "serverhmackey", "")
-	if serverHmacKey != "" {
-		fmt.Println(serverHmacKey)
-	}
-	endToEndSymKey := getValue(db, "endtoendsymkey", "")
-	if endToEndSymKey != "" {
-		fmt.Println("End-to-end encryption key (next two lines):")
-		fmt.Println(endToEndSymKey)
-	}
-	endToEndHmacKey := getValue(db, "endtoendhmackey", "")
-	if endToEndHmacKey != "" {
-		fmt.Println(endToEndHmacKey)
-	}
-	fmt.Println("")
 	fmt.Println("Username (email):", username)
 	fmt.Println("Password:", password)
 	fmt.Println("Sync point ID:", syncPointID)
+	fmt.Println("")
+	serverSymKeyStr := getValue(db, "serversymkey", "")
+	if serverSymKeyStr != "" {
+		fmt.Println("Server key (next two lines):")
+		fmt.Println(serverSymKeyStr)
+	}
+	serverHmacKeyStr := getValue(db, "serverhmackey", "")
+	if serverHmacKeyStr != "" {
+		fmt.Println(serverHmacKeyStr)
+	}
+	endToEndSymKeyStr := getValue(db, "endtoendsymkey", "")
+	if endToEndSymKeyStr != "" {
+		fmt.Println("End-to-end encryption key (next three lines):")
+		fmt.Println(endToEndSymKeyStr)
+	}
+	endToEndHmacKeyStr := getValue(db, "endtoendhmackey", "")
+	if endToEndHmacKeyStr != "" {
+		fmt.Println(endToEndHmacKeyStr)
+	}
+	endToEndIvStr := getValue(db, "endtoendinitializationvector", "")
+	if endToEndIvStr != "" {
+		fmt.Println(endToEndIvStr)
+	}
 }
 
-func generateAESKey() ([]byte, error) {
+func candeletegenerateAESKey() ([]byte, error) {
 	key := make([]byte, 32)
 	_, err := rand.Read(key)
 	return key, err
 }
 
-func generateSHAKey() ([]byte, error) {
+func candeletegenerateSHAKey() ([]byte, error) {
 	key := make([]byte, 32)
 	_, err := rand.Read(key)
 	return key, err
@@ -1302,6 +1452,12 @@ func (ptr *fileSortSlice) Swap(i, j int) {
 	fileTime := ptr.theSlice[i].FileTime
 	ptr.theSlice[i].FileTime = ptr.theSlice[j].FileTime
 	ptr.theSlice[j].FileTime = fileTime
+	fileHash := ptr.theSlice[i].FileHash
+	ptr.theSlice[i].FileHash = ptr.theSlice[j].FileHash
+	ptr.theSlice[j].FileHash = fileHash
+	reUpNeeded := ptr.theSlice[i].ReUpNeeded
+	ptr.theSlice[i].ReUpNeeded = ptr.theSlice[j].ReUpNeeded
+	ptr.theSlice[j].ReUpNeeded = reUpNeeded
 }
 
 func calcHash(filePath string) string {
@@ -1439,7 +1595,7 @@ func retrieveTreeFromDB(verbose bool, db *sql.DB) []samecommon.SameFileInfo {
 	return result
 }
 
-func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpublicid string, localPath string, localTree []samecommon.SameFileInfo, remotePath string, remoteTree []samecommon.SameFileInfo, serverTimeOffset int64, runForever bool, endToEndEncryption bool, endToEndSymmetricKey []byte, endToEndHmacKey []byte) {
+func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpublicid string, localPath string, localTree []samecommon.SameFileInfo, remotePath string, remoteTree []samecommon.SameFileInfo, serverTimeOffset int64, runForever bool, endToEndEncryption bool, endToEndIV []byte, endToEndSymmetricKey []byte, endToEndHmacKey []byte) {
 	filterDatabaseFile := "/" + databaseFileName
 	filterTempFile := "/" + tempFileName
 	localIdx := 0
@@ -1588,7 +1744,7 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 				fmt.Println("Pushing -->", localTree[toUploadLocal].FilePath[1:])
 				localfilepath := localPath + localTree[toUploadLocal].FilePath
 				filehash := localTree[toUploadLocal].FileHash
-				err := sendFile(verbose, wnet, syncpublicid, localPath, localfilepath, filehash, serverTimeOffset, endToEndEncryption, endToEndSymmetricKey, endToEndHmacKey)
+				err := sendFile(verbose, wnet, syncpublicid, localPath, localfilepath, filehash, serverTimeOffset, endToEndEncryption, endToEndIV, endToEndSymmetricKey, endToEndHmacKey)
 				if err != nil {
 					fmt.Fprintln(os.Stderr, err)
 					return
@@ -1606,7 +1762,7 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 				fmt.Println("Pulling <--", remoteTree[toDownloadRemote].FilePath[1:])
 				localfilepath := localPath + remoteTree[toDownloadRemote].FilePath
 				filehash := remoteTree[toDownloadRemote].FileHash
-				err := retrieveFile(verbose, db, wnet, syncpublicid, localPath, localfilepath, filehash, serverTimeOffset, endToEndEncryption, endToEndSymmetricKey, endToEndHmacKey)
+				err := retrieveFile(verbose, db, wnet, syncpublicid, localPath, localfilepath, filehash, serverTimeOffset, endToEndEncryption, endToEndIV, endToEndSymmetricKey, endToEndHmacKey)
 				if err != nil {
 					errmsg := err.Error()
 					if errmsg == "NoExist" {
@@ -2034,7 +2190,37 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, rootPath string, verbose
 										if verbose {
 											fmt.Println("Sync point ID:", syncPointID)
 										}
-										err = rpcUploadAllHashes(verbose, db, wnet, syncPointID, serverTimeOffset)
+										endToEndEncryption := false
+										var endToEndIV []byte
+										var endToEndSymmetricKey []byte
+										var endToEndHmacKey []byte
+										endToEndSymKeyStr := getValue(db, "endtoendsymkey", "")
+										if endToEndSymKeyStr != "" {
+											endToEndSymmetricKey, err = hex.DecodeString(endToEndSymKeyStr)
+											if err != nil {
+												fmt.Println(err)
+												return
+											}
+											endToEndHmacKeyStr := getValue(db, "endtoendhmackey", "")
+											endToEndHmacKey, err = hex.DecodeString(endToEndHmacKeyStr)
+											if err != nil {
+												fmt.Println(err)
+												return
+											}
+											endToEndIvStr := getValue(db, "endtoendinitializationvector", "")
+											endToEndIV, err = hex.DecodeString(endToEndIvStr)
+											if err != nil {
+												fmt.Println(err)
+												return
+											}
+											endToEndEncryption = true
+										}
+										if verbose {
+											if endToEndEncryption {
+												fmt.Println("End-to-end encryption is enabled.")
+											}
+										}
+										err = rpcUploadAllHashes(verbose, db, wnet, syncPointID, serverTimeOffset, endToEndEncryption, endToEndIV, endToEndSymmetricKey, endToEndHmacKey)
 										if err != nil {
 											fmt.Fprintln(os.Stderr, err)
 										} else {
@@ -2164,7 +2350,7 @@ func main() {
 	showEndToEndKeys := *xflag
 	runForever := *zflag
 	if verbose {
-		fmt.Println("same version 0.4.8")
+		fmt.Println("same version 0.4.10")
 		fmt.Println("Command line flags:")
 		fmt.Println("    Initialize mode:", onOff(initialize))
 		fmt.Println("    Configure mode:", onOff(configure))
@@ -2328,35 +2514,48 @@ func main() {
 		return
 	}
 	if generateEndToEndKeys {
-		endToEndSymBin, err := generateAESKey()
+		endToEndSymBin, err := samecommon.GenerateAESKey()
 		checkError(err)
-		endToEndSymKey := hex.EncodeToString(endToEndSymBin)
-		endToEndHmacBin, err := generateAESKey()
+		endToEndSymKeyStr := hex.EncodeToString(endToEndSymBin)
+		endToEndHmacBin, err := samecommon.GenerateAESKey()
 		checkError(err)
-		endToEndHmacKey := hex.EncodeToString(endToEndHmacBin)
-		samecommon.SetNameValuePair(db, "endtoendsymkey", endToEndSymKey)
+		endToEndHmacKeyStr := hex.EncodeToString(endToEndHmacBin)
+		endToEndIvBin, err := samecommon.GenerateAESInitializationVector()
+		checkError(err)
+		endToEndIvStr := hex.EncodeToString(endToEndIvBin)
+		samecommon.SetNameValuePair(db, "endtoendsymkey", endToEndSymKeyStr)
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
 		if verbose {
-			fmt.Println("endtoendsymkey set to", endToEndSymKey)
+			fmt.Println("endtoendsymkey set to", endToEndSymKeyStr)
 		}
-		samecommon.SetNameValuePair(db, "endtoendhmackey", endToEndHmacKey)
+		samecommon.SetNameValuePair(db, "endtoendhmackey", endToEndHmacKeyStr)
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
 		if verbose {
-			fmt.Println("endtoendhmackey set to", endToEndHmacKey)
+			fmt.Println("endtoendhmackey set to", endToEndHmacKeyStr)
 		}
-		fmt.Println(endToEndSymKey)
-		fmt.Println(endToEndHmacKey)
+		samecommon.SetNameValuePair(db, "endtoendinitializationvector", endToEndIvStr)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		if verbose {
+			fmt.Println("endtoendinitializationvector set to", endToEndIvStr)
+		}
+		fmt.Println(endToEndSymKeyStr)
+		fmt.Println(endToEndHmacKeyStr)
+		fmt.Println(endToEndIvStr)
 		return
 	}
 	if importEndToEndKeys {
 		var endToEndSymStr string
 		var endToEndHmacStr string
+		var endToEndIvStr string
 		fmt.Scanln(&endToEndSymStr)
 		endToEndSymKey, err := hex.DecodeString(endToEndSymStr)
 		if err != nil {
@@ -2365,6 +2564,12 @@ func main() {
 		}
 		fmt.Scanln(&endToEndHmacStr)
 		endToEndHmacKey, err := hex.DecodeString(endToEndHmacStr)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		fmt.Scanln(&endToEndIvStr)
+		endToEndIV, err := hex.DecodeString(endToEndIvStr)
 		if err != nil {
 			fmt.Println(err)
 			return
@@ -2384,6 +2589,14 @@ func main() {
 		}
 		if verbose {
 			fmt.Println("endtoendhmackey set to", hex.EncodeToString(endToEndHmacKey))
+		}
+		samecommon.SetNameValuePair(db, "endtoendinitializationvector", hex.EncodeToString(endToEndIV))
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		if verbose {
+			fmt.Println("endtoendinitializationvector set to", hex.EncodeToString(endToEndIV))
 		}
 		return
 	}
@@ -2447,12 +2660,13 @@ func main() {
 	}
 	if (len(serverSymKey) == 0) || (len(serverHmacKey) == 0) {
 		fmt.Println("Server key is not set up.")
-		fmt.Println("Use same -k on the server to export the key.")
-		fmt.Println("Use same -k to import them here.")
-		fmt.Println("Use same -j here to show the server key set here.")
+		fmt.Println("Use samed -k on the server to export the key. Use samed -g if you need to generate a key.")
+		fmt.Println("Use same -k to import the key here.")
+		fmt.Println("Use same -j here if you need to see what the server key set here is.")
 		return
 	}
 	endToEndEncryption := false
+	var endToEndIV []byte
 	var endToEndSymKey []byte
 	var endToEndHmacKey []byte
 	endToEndSymKeyStr = getValue(db, "endtoendsymkey", "")
@@ -2464,6 +2678,12 @@ func main() {
 		}
 		endToEndHmacKeyStr = getValue(db, "endtoendhmackey", "")
 		endToEndHmacKey, err = hex.DecodeString(endToEndHmacKeyStr)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		endToEndIvStr := getValue(db, "endtoendinitializationvector", "")
+		endToEndIV, err = hex.DecodeString(endToEndIvStr)
 		if err != nil {
 			fmt.Println(err)
 			return
@@ -2534,16 +2754,39 @@ func main() {
 		// otherwise when a user deletes a file, it will just magically
 		// reappear every time
 		localTree = retrieveTreeFromDB(verbose, db)
-		// sortSlice.theSlice = localTree
-		// sort.Sort(&sortSlice)
+		sortSlice.theSlice = localTree
+		sort.Sort(&sortSlice)
 		remoteTree, err := rpcGetServerTreeForSyncPoint(wnet, syncPointID)
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
-		// sortSlice.theSlice = remoteTree
-		// sort.Sort(&sortSlice) -- DB query on remote end should sort
-		synchronizeTrees(verbose, db, wnet, syncPointID, path, localTree, "", remoteTree, serverTimeOffset, runForever, endToEndEncryption, endToEndSymKey, endToEndHmacKey)
+		if endToEndEncryption {
+			// If end-to-end encryption is turned on, we need to
+			// decrypt the file names before we pass them into
+			// synchronizeTrees -- it would be seriously inconvenient
+			// to decrypt them there. We also need to sort them since
+			// the sort order of the encrypted version of the file
+			// names -- which is the order they're sorted on the server
+			// -- will be completely different from the order they're
+			// sorted into once they've been decrypted.
+			lremote := len(remoteTree)
+			for ii := 0; ii < lremote; ii++ {
+				remoteTree[ii].FilePath, err = decryptDirectoryPath(remoteTree[ii].FilePath, endToEndIV, endToEndSymKey, endToEndHmacKey)
+			}
+		}
+		sortSlice.theSlice = remoteTree
+		sort.Sort(&sortSlice)
+		if !endToEndEncryption {
+			fmt.Println("End-to-end encryption is not set up. Use same -e to import an end-to-end")
+			fmt.Println("encryption key. If you do not have an end-to-end encryption key, use same -g to")
+			fmt.Println("generate one.")
+			// return
+			fmt.Println("")
+			fmt.Println("Continuing anyway because this is a debug build.")
+			fmt.Println("")
+		}
+		synchronizeTrees(verbose, db, wnet, syncPointID, path, localTree, "", remoteTree, serverTimeOffset, runForever, endToEndEncryption, endToEndIV, endToEndSymKey, endToEndHmacKey)
 		keepRunning = false
 		if runForever {
 			wnet.Close()

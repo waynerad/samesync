@@ -1444,21 +1444,32 @@ func sendFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *samecom
 		fmt.Println("    Local storage:", ourLocalStorage)
 	}
 	if ourFileHash != filehash {
+		if verbose {
+			fmt.Println("    Error: file hash mismatch")
+			fmt.Println("    Requested file hash:", filehash)
+			fmt.Println("    Our file hash:", ourFileHash)
+		}
 		return "", errors.New("SendFile: hash requested does not match server's hash of that file. File:" + `"` + filepath + `"` + ".")
 	}
 	// localfilepath := localpath + samecommon.MakePathSeparatorsForThisOS(filepath)
-	localfilepath := localpath + samecommon.MakePathSeparatorsForThisOS(ourLocalStorage)
-	info, err := os.Stat(localfilepath)
 	noexist := false
-	if err != nil {
-		if os.IsNotExist(err) {
-			if verbose {
-				fmt.Println("    File does not exist.")
+	var info os.FileInfo
+	var localfilepath string
+	if ourLocalStorage != "" {
+		localfilepath = localpath + samecommon.MakePathSeparatorsForThisOS(ourLocalStorage)
+		info, err = os.Stat(localfilepath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				if verbose {
+					fmt.Println("    File does not exist.")
+				}
+				noexist = true
+			} else {
+				return "", err
 			}
-			noexist = true
-		} else {
-			return "", err
 		}
+	} else {
+		noexist = true
 	}
 	if noexist {
 		err = markFileAsReuploadneeded(db, fileid)
@@ -2268,7 +2279,7 @@ func main() {
 	showKeys := *kflag
 	createAdmin := *aflag
 	if verbose {
-		fmt.Println("samed version 0.4.8")
+		fmt.Println("samed version 0.4.10")
 		fmt.Println("Flags:")
 		fmt.Println("    Generate key mode:", onOff(generateKeys))
 		fmt.Println("    Initialize:", onOff(initialize))
