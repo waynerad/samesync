@@ -117,6 +117,61 @@ func stashFileInfo(db *sql.DB, filepath string, filesize int64, filetime int64, 
 	return err
 }
 
+func encryptDirectoryPath(filepath string, endToEndIV []byte, endToEndSymmetricKey []byte, endToEndHmacKey []byte) (string, error) {
+	// This function unfortunately blows up short names because it tacks a
+	// digital signature to the end, and then it hex encodes the whole
+	// thing, so filename length + 32 all times 2.
+	ciphertext := make([]byte, 4096)
+	pieces := strings.Split(filepath, "/")
+	lnp := len(pieces)
+	result := ""
+	for ii := 1; ii < lnp; ii++ {
+		block, err := aes.NewCipher(endToEndSymmetricKey)
+		if err != nil {
+			return "", err
+		}
+		dirCipher := cipher.NewOFB(block, endToEndIV)
+		plaintext := []byte(pieces[ii])
+		nn := len(plaintext)
+		dirCipher.XORKeyStream(ciphertext[:nn], plaintext)
+		dirHasher := hmac.New(sha256.New, endToEndHmacKey)
+		dirHasher.Write(ciphertext[:nn])
+		signature := dirHasher.Sum(nil)
+		result += "/" + hex.EncodeToString(ciphertext[:nn]) + hex.EncodeToString(signature)
+	}
+	return result, nil
+}
+
+func decryptDirectoryPath(filepath string, endToEndIV []byte, endToEndSymmetricKey []byte, endToEndHmacKey []byte) (string, error) {
+	plaintext := make([]byte, 4096)
+	pieces := strings.Split(filepath, "/")
+	lnp := len(pieces)
+	result := ""
+	for ii := 1; ii < lnp; ii++ {
+		ciphertext, err := hex.DecodeString(pieces[ii])
+		if err != nil {
+			return "", err
+		}
+		block, err := aes.NewCipher(endToEndSymmetricKey)
+		if err != nil {
+			return "", err
+		}
+		cipher := cipher.NewOFB(block, endToEndIV)
+		// cipher set up
+		nn := len(ciphertext) - 32
+		dirHasher := hmac.New(sha256.New, endToEndHmacKey)
+		dirHasher.Write(ciphertext[:nn])
+		cipher.XORKeyStream(plaintext[:nn], ciphertext[:nn])
+		expectedMAC := dirHasher.Sum(nil)
+		match := hmac.Equal(ciphertext[len(ciphertext)-32:], expectedMAC)
+		if !match {
+			return "", errors.New("decryptDirectoryPath: directory HMAC signature check failed.")
+		}
+		result += "/" + string(plaintext[:nn])
+	}
+	return result, nil
+}
+
 // ----------------------------------------------------------------
 // Remote calls
 // ----------------------------------------------------------------
@@ -530,61 +585,6 @@ func rpcGetServerTreeForSyncPoint(wnet wrpc.IWNetConnection, syncpublicid string
 	return result, nil
 }
 
-func encryptDirectoryPath(filepath string, endToEndIV []byte, endToEndSymmetricKey []byte, endToEndHmacKey []byte) (string, error) {
-	// This function unfortunately blows up short names because it tacks a
-	// digital signature to the end, and then it hex encodes the whole
-	// thing, so filename length + 32 all times 2.
-	ciphertext := make([]byte, 4096)
-	pieces := strings.Split(filepath, "/")
-	lnp := len(pieces)
-	result := ""
-	for ii := 1; ii < lnp; ii++ {
-		block, err := aes.NewCipher(endToEndSymmetricKey)
-		if err != nil {
-			return "", err
-		}
-		dirCipher := cipher.NewOFB(block, endToEndIV)
-		plaintext := []byte(pieces[ii])
-		nn := len(plaintext)
-		dirCipher.XORKeyStream(ciphertext[:nn], plaintext)
-		dirHasher := hmac.New(sha256.New, endToEndHmacKey)
-		dirHasher.Write(ciphertext[:nn])
-		signature := dirHasher.Sum(nil)
-		result += "/" + hex.EncodeToString(ciphertext[:nn]) + hex.EncodeToString(signature)
-	}
-	return result, nil
-}
-
-func decryptDirectoryPath(filepath string, endToEndIV []byte, endToEndSymmetricKey []byte, endToEndHmacKey []byte) (string, error) {
-	plaintext := make([]byte, 4096)
-	pieces := strings.Split(filepath, "/")
-	lnp := len(pieces)
-	result := ""
-	for ii := 1; ii < lnp; ii++ {
-		ciphertext, err := hex.DecodeString(pieces[ii])
-		if err != nil {
-			return "", err
-		}
-		block, err := aes.NewCipher(endToEndSymmetricKey)
-		if err != nil {
-			return "", err
-		}
-		cipher := cipher.NewOFB(block, endToEndIV)
-		// cipher set up
-		nn := len(ciphertext) - 32
-		dirHasher := hmac.New(sha256.New, endToEndHmacKey)
-		dirHasher.Write(ciphertext[:nn])
-		cipher.XORKeyStream(plaintext[:nn], ciphertext[:nn])
-		expectedMAC := dirHasher.Sum(nil)
-		match := hmac.Equal(ciphertext[len(ciphertext)-32:], expectedMAC)
-		if !match {
-			return "", errors.New("decryptDirectoryPath: directory HMAC signature check failed.")
-		}
-		result += "/" + string(plaintext[:nn])
-	}
-	return result, nil
-}
-
 func sendFile(verbose bool, wnet wrpc.IWNetConnection, syncpublicid string, localdir string, localfilepath string, filehash string, serverTimeOffset int64, endToEndEncryption bool, endToEndIV []byte, endToEndSymmetricKey []byte, endToEndHmacKey []byte) error {
 	info, err := os.Stat(localfilepath)
 	if err != nil {
@@ -964,7 +964,7 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 				if bytesread >= endToEndFileSizeMinusHMACSignature {
 					// we are in the HMAC signature
 					// capacity should be enough that this append doesn't cause a memory allocation
-					endToEndActualHmac = append(endToEndActualHmac, endToEndBuffer[:nIn]...)
+					endToEndActualHmac = append(endToEndActualHmac, buffer[:nIn]...)
 				} else {
 					if (bytesread + int64(nIn)) > endToEndFileSizeMinusHMACSignature {
 						// The buffer has the end of the file and the beginning or all of the HMAC signature
@@ -1091,12 +1091,19 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 	return nil
 }
 
-func rpcMarkFileDeleted(verbose bool, wnet wrpc.IWNetConnection, syncpublicid string, filepath string, filehash string, serverTimeOffset int64) error {
+func rpcMarkFileDeleted(verbose bool, wnet wrpc.IWNetConnection, syncpublicid string, filepath string, filehash string, serverTimeOffset int64, endToEndEncryption bool, endToEndIV []byte, endToEndSymmetricKey []byte, endToEndHmacKey []byte) error {
 	modtime := time.Now().UnixNano()
 	if verbose {
 		fmt.Println("Marking remote file for deletion:", filepath, "with modtime", modtime)
 		fmt.Println("    serverTimeOffset", serverTimeOffset)
 		fmt.Println("    time sent", modtime+serverTimeOffset)
+	}
+	var remotePath string
+	var err error
+	if endToEndEncryption {
+		remotePath, err = encryptDirectoryPath(filepath, endToEndIV, endToEndSymmetricKey, endToEndHmacKey)
+	} else {
+		remotePath = filepath
 	}
 	rpc := wrpc.NewDB()
 	rpc.StartDB("MarkFileDeleted", 0, 1)
@@ -1107,10 +1114,10 @@ func rpcMarkFileDeleted(verbose bool, wnet wrpc.IWNetConnection, syncpublicid st
 	rpc.AddColumn("", wrpc.ColString)
 	rpc.StartRow()
 	rpc.AddRowColumnString(syncpublicid)
-	rpc.AddRowColumnString(filepath)
+	rpc.AddRowColumnString(remotePath)
 	rpc.AddRowColumnInt(modtime + serverTimeOffset)
 	rpc.AddRowColumnString(filehash)
-	err := rpc.SendDB(wnet)
+	err = rpc.SendDB(wnet)
 	if err != nil {
 		return err
 	}
@@ -1785,7 +1792,7 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 				fmt.Println("Pushing delete notification: ", remoteTree[toDeleteRemote].FilePath[1:])
 				remotefilepath := remoteTree[toDeleteRemote].FilePath
 				filehash := remoteTree[toDeleteRemote].FileHash
-				err := rpcMarkFileDeleted(verbose, wnet, syncpublicid, remotefilepath, filehash, serverTimeOffset)
+				err := rpcMarkFileDeleted(verbose, wnet, syncpublicid, remotefilepath, filehash, serverTimeOffset, endToEndEncryption, endToEndIV, endToEndSymmetricKey, endToEndHmacKey)
 				if err != nil {
 					fmt.Fprintln(os.Stderr, err.Error())
 					panic(err)
@@ -2350,7 +2357,7 @@ func main() {
 	showEndToEndKeys := *xflag
 	runForever := *zflag
 	if verbose {
-		fmt.Println("same version 0.4.10")
+		fmt.Println("same version 0.4.13")
 		fmt.Println("Command line flags:")
 		fmt.Println("    Initialize mode:", onOff(initialize))
 		fmt.Println("    Configure mode:", onOff(configure))
@@ -2781,10 +2788,10 @@ func main() {
 			fmt.Println("End-to-end encryption is not set up. Use same -e to import an end-to-end")
 			fmt.Println("encryption key. If you do not have an end-to-end encryption key, use same -g to")
 			fmt.Println("generate one.")
-			// return
-			fmt.Println("")
-			fmt.Println("Continuing anyway because this is a debug build.")
-			fmt.Println("")
+			return
+			// fmt.Println("")
+			// fmt.Println("Continuing anyway because this is a debug build.")
+			// fmt.Println("")
 		}
 		synchronizeTrees(verbose, db, wnet, syncPointID, path, localTree, "", remoteTree, serverTimeOffset, runForever, endToEndEncryption, endToEndIV, endToEndSymKey, endToEndHmacKey)
 		keepRunning = false
