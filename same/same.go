@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/ascii85"
 	"encoding/hex"
 	"errors"
 	"flag"
@@ -187,35 +188,35 @@ func rpcGetTime(wnet wrpc.IWNetConnection) (int64, error) {
 	}
 	result, err := wrpc.StandardIntReply(wnet, "GetTime")
 	return result, err
-	// reply, err := wrpc.StandardReply(wnet, "GetTime")
-	// if err != nil {
-	// 	return 0, err
-	// }
-	// result, err := reply.GetInt(0, 0, 0)
-	// if err != nil {
-	// 	return 0, err
-	// }
-	// errmsg, err := reply.GetString(0, 0, 1)
-	// if err != nil {
-	// 	return 0, err
-	// }
-	// if errmsg != "" {
-	// 	return result, errors.New(errmsg)
-	// }
-	// return result, nil
 }
 
 func rpcLogin(wnet wrpc.IWNetConnection, username string, password string) error {
+	if len(password) != 80 {
+		return errors.New("Password is wrong length. Check password and make sure password is valid.")
+	}
+	passwordBin := make([]byte, 64)
+	ndst, _, err := ascii85.Decode(passwordBin, []byte(password), true)
+	if err != nil {
+		return err
+	}
+	if ndst != 64 {
+		return errors.New("Password is of wrong length.")
+	}
+	if len(passwordBin) != 64 {
+		panic("Decoded password is wrong length.")
+	}
 	if wnet == nil {
 		return errors.New("Cannot login: not connected to server.")
 	}
 	rpc := wrpc.NewDB()
 	rpc.StartDB("Login", 0, 1)
-	rpc.StartTable("", 1, 1)
+	rpc.StartTable("", 2, 1)
 	rpc.AddColumn("", wrpc.ColString)
+	rpc.AddColumn("", wrpc.ColByteArray)
 	rpc.StartRow()
 	rpc.AddRowColumnString(username)
-	err := rpc.SendDB(wnet)
+	rpc.AddRowColumnByteArray(passwordBin[:32])
+	err = rpc.SendDB(wnet)
 	if err != nil {
 		return err
 	}
@@ -243,20 +244,11 @@ func rpcLogin(wnet wrpc.IWNetConnection, username string, password string) error
 		}
 		return errors.New(reply.GetDBName() + ": " + errmsg)
 	}
-	saltBin, err := reply.GetByteArray(0, 0, 0)
+	challengeBin, err := reply.GetByteArray(0, 0, 0)
 	if err != nil {
 		return err
 	}
-	challengeBin, err := reply.GetByteArray(0, 0, 1)
-	if err != nil {
-		return err
-	}
-	// We use our password and their salt to reproduce the password hash
-	// they they have on their end
-	theirHash := samecommon.CalculatePwHash(saltBin, password)
-	// Now with that, we use it with their challenge to formulate our
-	// response.
-	combo := append(theirHash, challengeBin...)
+	combo := append(passwordBin[32:], challengeBin...) // destroys passwordBin, good thing we don't need it in the rest of this function
 	sum := sha256.Sum256(combo)
 	response := make([]byte, 32)
 	// copy(response,sum) -- gives error second argument to copy should be slice or string; have [32]byte
@@ -335,18 +327,20 @@ func rpcAddUser(wnet wrpc.IWNetConnection, username string, role int) (string, e
 	if err != nil {
 		return "", err
 	}
-	password, err := reply.GetString(0, 0, 0)
+	passwordBin, err := reply.GetByteArray(0, 0, 0)
 	if err != nil {
 		return "", err
 	}
 	errmsg, err := reply.GetString(0, 0, 1)
 	if err != nil {
-		return password, err
+		return "", err
 	}
 	if errmsg != "" {
-		return password, errors.New(errmsg)
+		return "", errors.New(errmsg)
 	}
-	return password, nil
+	passwordStr := make([]byte, 86)
+	num := ascii85.Encode(passwordStr, passwordBin)
+	return string(passwordStr[:num]), nil
 }
 
 func rpcAddSyncPoint(wnet wrpc.IWNetConnection, path string) (string, error) {
@@ -1336,41 +1330,22 @@ func showConfiguration(db *sql.DB, verbose bool) {
 	fmt.Println("Username (email):", username)
 	fmt.Println("Password:", password)
 	fmt.Println("Sync point ID:", syncPointID)
-	fmt.Println("")
 	serverSymKeyStr := getValue(db, "serversymkey", "")
 	if serverSymKeyStr != "" {
-		fmt.Println("Server key (next two lines):")
-		fmt.Println(serverSymKeyStr)
-	}
-	serverHmacKeyStr := getValue(db, "serverhmackey", "")
-	if serverHmacKeyStr != "" {
+		fmt.Print("Server key: ")
+		fmt.Print(serverSymKeyStr)
+		serverHmacKeyStr := getValue(db, "serverhmackey", "")
 		fmt.Println(serverHmacKeyStr)
 	}
 	endToEndSymKeyStr := getValue(db, "endtoendsymkey", "")
 	if endToEndSymKeyStr != "" {
-		fmt.Println("End-to-end encryption key (next three lines):")
-		fmt.Println(endToEndSymKeyStr)
-	}
-	endToEndHmacKeyStr := getValue(db, "endtoendhmackey", "")
-	if endToEndHmacKeyStr != "" {
-		fmt.Println(endToEndHmacKeyStr)
-	}
-	endToEndIvStr := getValue(db, "endtoendinitializationvector", "")
-	if endToEndIvStr != "" {
+		fmt.Print("End-to-end encryption key: ")
+		fmt.Print(endToEndSymKeyStr)
+		endToEndHmacKeyStr := getValue(db, "endtoendhmackey", "")
+		fmt.Print(endToEndHmacKeyStr)
+		endToEndIvStr := getValue(db, "endtoendinitializationvector", "")
 		fmt.Println(endToEndIvStr)
 	}
-}
-
-func candeletegenerateAESKey() ([]byte, error) {
-	key := make([]byte, 32)
-	_, err := rand.Read(key)
-	return key, err
-}
-
-func candeletegenerateSHAKey() ([]byte, error) {
-	key := make([]byte, 32)
-	_, err := rand.Read(key)
-	return key, err
 }
 
 // ----------------------------------------------------------------
@@ -1789,7 +1764,7 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 					}
 					anythingChanged = true
 				}
-				fmt.Println("Pushing delete notification: ", remoteTree[toDeleteRemote].FilePath[1:])
+				fmt.Println("Pushing delete notification:", remoteTree[toDeleteRemote].FilePath[1:])
 				remotefilepath := remoteTree[toDeleteRemote].FilePath
 				filehash := remoteTree[toDeleteRemote].FileHash
 				err := rpcMarkFileDeleted(verbose, wnet, syncpublicid, remotefilepath, filehash, serverTimeOffset, endToEndEncryption, endToEndIV, endToEndSymmetricKey, endToEndHmacKey)
@@ -1807,7 +1782,7 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 					}
 					anythingChanged = true
 				}
-				fmt.Println("Deleting: ", localTree[toDeleteLocal].FilePath[1:])
+				fmt.Println("Deleting:", localTree[toDeleteLocal].FilePath[1:])
 				localfilepath := localPath + samecommon.MakePathSeparatorsForThisOS(localTree[toDeleteLocal].FilePath)
 				if verbose {
 					fmt.Println("Deleting local file path:", localfilepath)
@@ -1847,6 +1822,7 @@ func getYesNo(reader *bufio.Reader, prompt string) bool {
 	}
 	return result
 }
+
 func getLine(reader *bufio.Reader) string {
 	result, err := reader.ReadString('\n')
 	checkError(err)
@@ -1917,12 +1893,12 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, rootPath string, verbose
 		params := strings.Split(command, " ")
 		if len(params) > 0 {
 			switch params[0] {
-			case "list":
+			case "show":
 				if len(params) == 1 {
-					fmt.Println("List what?")
-					fmt.Println("    users -- list users")
-					fmt.Println("    syncpoints -- list sync points")
-					fmt.Println("    grants -- list access grants of users to sync points")
+					fmt.Println("Show what?")
+					fmt.Println("    users -- show users")
+					fmt.Println("    syncpoints -- show sync points")
+					fmt.Println("    grants -- show access grants of users to sync points")
 				} else {
 					switch params[1] {
 					case "users":
@@ -2292,10 +2268,10 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, rootPath string, verbose
 					}
 				}
 			case "help":
-				fmt.Println("list")
-				fmt.Println("    users -- list users")
-				fmt.Println("    syncpoints -- list sync points")
-				fmt.Println("    grants -- list access grants of users to sync points")
+				fmt.Println("show")
+				fmt.Println("    users -- show users")
+				fmt.Println("    syncpoints -- show sync points")
+				fmt.Println("    grants -- show access grants of users to sync points")
 				fmt.Println("add")
 				fmt.Println("    user -- add user")
 				fmt.Println("    syncpoint -- add sync point on server")
@@ -2357,7 +2333,7 @@ func main() {
 	showEndToEndKeys := *xflag
 	runForever := *zflag
 	if verbose {
-		fmt.Println("same version 0.4.13")
+		fmt.Println("same version 0.5.1")
 		fmt.Println("Command line flags:")
 		fmt.Println("    Initialize mode:", onOff(initialize))
 		fmt.Println("    Configure mode:", onOff(configure))
@@ -2402,20 +2378,28 @@ func main() {
 	}
 	defer db.Close()
 	if importServerKeys {
-		var symKeyStr string
-		var hmacKeyStr string
-		fmt.Scanln(&symKeyStr)
-		symkey, err := hex.DecodeString(symKeyStr)
-		if err != nil {
-			fmt.Println(err)
+		keyboard := bufio.NewReader(os.Stdin)
+		fmt.Print("Server key: ")
+		keyLine := getLine(keyboard)
+		if len(keyLine) != 128 {
+			fmt.Fprintln(os.Stderr, "Key is of wrong length.")
 			return
 		}
-		fmt.Scanln(&hmacKeyStr)
-		hmackey, err := hex.DecodeString(hmacKeyStr)
+		keysAllBytes, err := hex.DecodeString(keyLine)
 		if err != nil {
-			fmt.Println(err)
+			fmt.Fprintln(os.Stderr, "Key is not in hexadecimal format.")
+			fmt.Fprintln(os.Stderr, err)
 			return
 		}
+		if verbose {
+			fmt.Println("Key entered:", hex.EncodeToString(keysAllBytes))
+		}
+
+		symkey := make([]byte, 32)
+		hmackey := make([]byte, 32)
+		copy(symkey, keysAllBytes[:32])
+		copy(hmackey, keysAllBytes[32:])
+
 		samecommon.SetNameValuePair(db, "serversymkey", hex.EncodeToString(symkey))
 		if err != nil {
 			fmt.Println(err)
@@ -2447,7 +2431,6 @@ func main() {
 		fmt.Print("Server: ")
 		keyboard := bufio.NewReader(os.Stdin)
 		server := getLine(keyboard)
-		// fmt.Scanln(&server)
 		if server != "" {
 			samecommon.SetNameValuePair(db, "server", server)
 			if err != nil {
@@ -2461,7 +2444,6 @@ func main() {
 		port := 0
 		fmt.Print("Port: ")
 		ptStr := getLine(keyboard)
-		// fmt.Scanln(&ptStr)
 		if ptStr != "" {
 			port = strToInt(ptStr)
 			if port != 0 {
@@ -2477,7 +2459,6 @@ func main() {
 		}
 		fmt.Print("Username (email): ")
 		username := getLine(keyboard)
-		// fmt.Scanln(&username)
 		if username != "" {
 			samecommon.SetNameValuePair(db, "username", username)
 			if err != nil {
@@ -2490,7 +2471,6 @@ func main() {
 		}
 		fmt.Print("Password: ")
 		password := getLine(keyboard)
-		// fmt.Scanln(&password)
 		if password != "" {
 			samecommon.SetNameValuePair(db, "password", password)
 			if err != nil {
@@ -2503,7 +2483,6 @@ func main() {
 		}
 		fmt.Print("Sync point ID: ")
 		syncPointID := getLine(keyboard)
-		// fmt.Scanln(&syncPointID)
 		if syncPointID != "" {
 			samecommon.SetNameValuePair(db, "syncpointid", syncPointID)
 			if err != nil {
@@ -2554,33 +2533,39 @@ func main() {
 		if verbose {
 			fmt.Println("endtoendinitializationvector set to", endToEndIvStr)
 		}
-		fmt.Println(endToEndSymKeyStr)
-		fmt.Println(endToEndHmacKeyStr)
+		fmt.Print("End-to-end key: ")
+		fmt.Print(endToEndSymKeyStr)
+		fmt.Print(endToEndHmacKeyStr)
 		fmt.Println(endToEndIvStr)
 		return
 	}
 	if importEndToEndKeys {
-		var endToEndSymStr string
-		var endToEndHmacStr string
-		var endToEndIvStr string
-		fmt.Scanln(&endToEndSymStr)
-		endToEndSymKey, err := hex.DecodeString(endToEndSymStr)
-		if err != nil {
-			fmt.Println(err)
+
+		keyboard := bufio.NewReader(os.Stdin)
+		fmt.Print("End-to-end key: ")
+		keyLine := getLine(keyboard)
+		if len(keyLine) != 160 {
+			fmt.Fprintln(os.Stderr, "Key is of wrong length.")
 			return
 		}
-		fmt.Scanln(&endToEndHmacStr)
-		endToEndHmacKey, err := hex.DecodeString(endToEndHmacStr)
+		keysAllBytes, err := hex.DecodeString(keyLine)
 		if err != nil {
-			fmt.Println(err)
+			fmt.Fprintln(os.Stderr, "Key is not in hexadecimal format.")
+			fmt.Fprintln(os.Stderr, err)
 			return
 		}
-		fmt.Scanln(&endToEndIvStr)
-		endToEndIV, err := hex.DecodeString(endToEndIvStr)
-		if err != nil {
-			fmt.Println(err)
-			return
+		if verbose {
+			fmt.Println("Key entered:", hex.EncodeToString(keysAllBytes))
 		}
+
+		endToEndSymKey := make([]byte, 32)
+		endToEndHmacKey := make([]byte, 32)
+		endToEndIV := make([]byte, 16)
+
+		copy(endToEndSymKey, keysAllBytes[:32])
+		copy(endToEndHmacKey, keysAllBytes[32:64])
+		copy(endToEndIV, keysAllBytes[64:])
+
 		samecommon.SetNameValuePair(db, "endtoendsymkey", hex.EncodeToString(endToEndSymKey))
 		if err != nil {
 			fmt.Println(err)
@@ -2789,9 +2774,6 @@ func main() {
 			fmt.Println("encryption key. If you do not have an end-to-end encryption key, use same -g to")
 			fmt.Println("generate one.")
 			return
-			// fmt.Println("")
-			// fmt.Println("Continuing anyway because this is a debug build.")
-			// fmt.Println("")
 		}
 		synchronizeTrees(verbose, db, wnet, syncPointID, path, localTree, "", remoteTree, serverTimeOffset, runForever, endToEndEncryption, endToEndIV, endToEndSymKey, endToEndHmacKey)
 		keepRunning = false

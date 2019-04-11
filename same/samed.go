@@ -48,13 +48,13 @@ func onOff(bv bool) string {
 // generate 32 bytes. But they're all separate functions, because
 // conceptually they generate different things.
 
-func generatePassword() (string, error) {
+func candeleteGeneratePassword() (string, error) {
 	key := make([]byte, 32)
 	_, err := rand.Read(key)
 	if err != nil {
 		return "", err
 	}
-	password := make([]byte, 99)
+	password := make([]byte, 46)
 	num := ascii85.Encode(password, key)
 	return string(password[:num]), err
 }
@@ -139,7 +139,7 @@ func initializeServerTables(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	cmd = "CREATE TABLE user (userid INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL, pwsalt TEXT NOT NULL, pwhash TEXT NOT NULL, role INTEGER);"
+	cmd = "CREATE TABLE user (userid INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL, pwsalt TEXT NOT NULL, pwhash TEXT NOT NULL, challengeresponsekey TEXT NOT NULL, role INTEGER);"
 	stmtCreate, err = tx.Prepare(cmd)
 	if err != nil {
 		return err
@@ -206,6 +206,34 @@ func initializeServerTables(db *sql.DB) error {
 	return err
 }
 
+func generateUserPasswordSet() ([]byte, []byte, string, string, string, error) {
+	passwordStore, err := samecommon.GenerateSHAKey()
+	if err != nil {
+		return nil, nil, "", "", "", err
+	}
+	// "password" CR is the challenge-response shared secret
+	passwordCR, err := samecommon.GenerateSHAKey()
+	if err != nil {
+		return nil, nil, "", "", "", err
+	}
+	pwSaltBin, err := generatePwSalt()
+	if err != nil {
+		return nil, nil, "", "", "", err
+	}
+	pwsalt := hex.EncodeToString(pwSaltBin)
+	pwHashBin := samecommon.CalculatePwHash(pwSaltBin, passwordStore)
+	pwhash := hex.EncodeToString(pwHashBin)
+	challengeresponsekey := hex.EncodeToString(passwordCR)
+	return passwordStore, passwordCR, pwsalt, pwhash, challengeresponsekey, nil
+}
+
+func passwordPiecesToPassword(passwordStore []byte, passwordCR []byte) []byte {
+	combo := make([]byte, 64)
+	copy(combo[:32], passwordStore)
+	copy(combo[32:], passwordCR)
+	return combo
+}
+
 func createTheAdminAccount(db *sql.DB, verbose bool) error {
 	fmt.Println("Creating admin account.")
 	username := "admin"
@@ -231,7 +259,7 @@ func createTheAdminAccount(db *sql.DB, verbose bool) error {
 			return err
 		}
 	}
-	password, err := generatePassword()
+	passwordStore, passwordCR, pwsalt, pwhash, challengeresponsekey, err := generateUserPasswordSet()
 	if err != nil {
 		err2 := tx.Rollback()
 		if err2 != nil {
@@ -240,26 +268,14 @@ func createTheAdminAccount(db *sql.DB, verbose bool) error {
 			return err
 		}
 	}
-	pwSaltBin, err := generatePwSalt()
-	if err != nil {
-		err2 := tx.Rollback()
-		if err2 != nil {
-			return err2
-		} else {
-			return err
-		}
-	}
-	pwsalt := hex.EncodeToString(pwSaltBin)
-	pwHashBin := samecommon.CalculatePwHash(pwSaltBin, password)
-	pwhash := hex.EncodeToString(pwHashBin)
 	role := samecommon.RoleAdmin
 	if userid == 0 {
-		cmd = "INSERT INTO user (username, pwsalt, pwhash, role) VALUES (?, ?, ?, ?);"
+		cmd = "INSERT INTO user (username, pwsalt, pwhash, challengeresponsekey, role) VALUES (?, ?, ?, ?, ?);"
 		stmtIns, err := tx.Prepare(cmd)
 		if err != nil {
 			return err
 		}
-		_, err = stmtIns.Exec(username, pwsalt, pwhash, role)
+		_, err = stmtIns.Exec(username, pwsalt, pwhash, challengeresponsekey, role)
 		if err != nil {
 			return err
 		}
@@ -267,9 +283,9 @@ func createTheAdminAccount(db *sql.DB, verbose bool) error {
 			fmt.Println("    Admin account created.")
 		}
 	} else {
-		cmd = "UPDATE user SET username = ?, pwsalt = ?, pwhash = ?, role = ? WHERE userid = ?;"
+		cmd = "UPDATE user SET username = ?, pwsalt = ?, pwhash = ?, challengeresponsekey = ?, role = ? WHERE userid = ?;"
 		stmtUpd, err := tx.Prepare(cmd)
-		_, err = stmtUpd.Exec(username, pwsalt, pwhash, role, userid)
+		_, err = stmtUpd.Exec(username, pwsalt, pwhash, challengeresponsekey, role, userid)
 		if err != nil {
 			return err
 		}
@@ -279,6 +295,7 @@ func createTheAdminAccount(db *sql.DB, verbose bool) error {
 		}
 	}
 	err = tx.Commit()
+	password := passwordPiecesToPassword(passwordStore, passwordCR)
 	if verbose {
 		fmt.Println("    Admin account created:")
 		fmt.Println("        username (username): ", username)
@@ -287,7 +304,10 @@ func createTheAdminAccount(db *sql.DB, verbose bool) error {
 		fmt.Println("        password hash: ", pwhash)
 		fmt.Println("        role: ", samecommon.RoleFlagsToString(role))
 	}
-	fmt.Println(password)
+	passwEncodeBin := make([]byte, 86)
+	num := ascii85.Encode(passwEncodeBin, password)
+	asciiPassword := string(passwEncodeBin[:num])
+	fmt.Println("Admin password is:", asciiPassword)
 	return err
 }
 
@@ -594,37 +614,27 @@ func receiveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *same
 	return "ReceptionComplete", nil
 }
 
-func login(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *samecommon.AuthInfo, username string) error {
-	// Changed this systtem so it's a challenge/response system that also
-	// changes the protocol used on the wire. This protects against the
-	// theoretical possibility that an attacker has the server key but does
-	// not have the password for the individual user. Note: This does not
-	// protect against an attacker who has access to *both* the database
-	// and the incoming/outgoing network traffice (i.e. the company hosting
-	// the server). To protect against that, you need to turn on the
-	// end-to-end encryption.
-	if verbose {
-		fmt.Println("Logging in as username", username)
-	}
-	cmd := "SELECT userid, pwsalt, pwhash, role FROM user WHERE username = ?;"
+func login(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *samecommon.AuthInfo, username string, password []byte) error {
+	cmd := "SELECT userid, pwsalt, pwhash, challengeresponsekey, role FROM user WHERE username = ?;"
 	stmtSelExisting, err := db.Prepare(cmd)
 	if err != nil {
-		return errors.New("login: " + err.Error())
+		return errors.New("login 622: " + err.Error())
 	}
 	rowsExisting, err := stmtSelExisting.Query(username)
 	if err != nil {
-		return errors.New("login: " + err.Error())
+		return errors.New("login 626: " + err.Error())
 	}
 	defer rowsExisting.Close()
 	var userid int64
 	var pwSaltTxt string
 	var pwHashTxt string
+	var challengeresponsekey string
 	var role int
 	userid = 0
 	for rowsExisting.Next() {
-		err = rowsExisting.Scan(&userid, &pwSaltTxt, &pwHashTxt, &role)
+		err = rowsExisting.Scan(&userid, &pwSaltTxt, &pwHashTxt, &challengeresponsekey, &role)
 		if err != nil {
-			return errors.New("login: " + err.Error())
+			return errors.New("login 638: " + err.Error())
 		}
 	}
 	if userid == 0 {
@@ -632,29 +642,36 @@ func login(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *samecommon
 	}
 	pwSaltBin, err := hex.DecodeString(pwSaltTxt)
 	if err != nil {
-		return errors.New("login: " + err.Error())
+		return errors.New("login 647: " + err.Error())
+	}
+	pwHashBin1 := samecommon.CalculatePwHash(pwSaltBin, password)
+	pwHashBin2, err := hex.DecodeString(pwHashTxt)
+	if err != nil {
+		return errors.New("login 652: " + err.Error())
+	}
+	if subtle.ConstantTimeCompare(pwHashBin1, pwHashBin2) == 0 {
+		if verbose {
+			fmt.Println("    Incorrect password.")
+		}
+		return errors.New("Incorrect password.")
+	}
+	pwCRSecretBin, err := hex.DecodeString(challengeresponsekey)
+	if err != nil {
+		return errors.New("login 662: " + err.Error())
 	}
 	challengeBin, err := generateChallenge()
 	if err != nil {
-		return errors.New("login: " + err.Error())
+		return errors.New("login 666: " + err.Error())
 	}
-	// We've verified the user exists. Now we send our challenge. We don't
-	// have their password and they don't have our salt, so we send our
-	// salt so they can re-create our password hash, which both they and we
-	// will use on the challenge. If the results match, we accept the login
-	// and send them a new key encrypted with the password hash, which the
-	// attacker does not have because we never sent it across the network.
+	// We've verified the user exists. Now we send our challenge.
 	msg := wrpc.NewDB()
 	msg.StartDB("Challenge", 0, 1)
 	msg.StartTable("", 2, 1)
-	msg.AddColumn("salt", wrpc.ColByteArray)
-	msg.AddColumn("challenge", wrpc.ColByteArray)
+	msg.AddColumn("", wrpc.ColByteArray)
 	msg.StartRow()
-	msg.AddRowColumnByteArray(pwSaltBin)
 	msg.AddRowColumnByteArray(challengeBin)
 	msg.SendDB(wnet)
 	if verbose {
-		fmt.Println("    Salt:", pwSaltTxt)
 		challengeTxt := hex.EncodeToString(challengeBin)
 		fmt.Println("    Challenge:", challengeTxt)
 		fmt.Println("    Sent Challenge message")
@@ -691,8 +708,7 @@ func login(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *samecommon
 		fmt.Println("    Response:", responseTxt)
 	}
 	// We do the same calculation ourselves to see what the respose should be
-	pwHashBin, err := hex.DecodeString(pwHashTxt)
-	combo := append(pwHashBin, challengeBin...)
+	combo := append(pwCRSecretBin, challengeBin...) // destroys pwCRSecretBin, good thing we don't use it for anything else in this function
 	sum := sha256.Sum256(combo)
 	shouldBeBin := make([]byte, 32)
 	// copy(shouldBeBin,sum) -- gives error second argument to copy should be slice or string; have [32]byte
@@ -703,37 +719,18 @@ func login(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *samecommon
 		shouldBeTxt := hex.EncodeToString(shouldBeBin)
 		fmt.Println("    Response should be:", shouldBeTxt)
 	}
-	if subtle.ConstantTimeCompare(responseBin, shouldBeBin) == 1 {
-		auth.UserId = userid
-		auth.Role = role
+	if subtle.ConstantTimeCompare(responseBin, shouldBeBin) == 0 {
 		if verbose {
-			fmt.Println("    Logged in as username", username, "userid", userid, "role flags:", samecommon.RoleFlagsToString(role))
+			fmt.Println("    Incorrect challenge/response.")
 		}
-		return nil
+		return errors.New("Incorrect challenge/response.")
 	}
+	auth.UserId = userid
+	auth.Role = role
 	if verbose {
-		fmt.Println("    Incorrect challenge/response.")
+		fmt.Println("    Logged in as username", username, "userid", userid, "role flags:", samecommon.RoleFlagsToString(role))
 	}
-	return errors.New("Incorrect challenge/response.")
-	// --------------------------------
-	// candelete everything after this
-	// pwHashBin1 := calculatePwHash(pwSaltBin, password)
-	// pwHashBin2, err := hex.DecodeString(pwhash)
-	// if err != nil {
-	// 	return errors.New("login: " + err.Error())
-	// }
-	// if subtle.ConstantTimeCompare(pwHashBin1, pwHashBin2) == 1 {
-	// 	auth.UserId = userid
-	// 	auth.Role = role
-	// 	if verbose {
-	// 		fmt.Println("    Logged in as username", username, "userid", userid, "role flags:", samecommon.RoleFlagsToString(role))
-	// 	}
-	// 	return nil
-	// }
-	// if verbose {
-	// 	fmt.Println("    Incorrect password.")
-	// }
-	// return errors.New("Incorrect password.")
+	return nil
 }
 
 func listUsers(db *sql.DB, auth *samecommon.AuthInfo) ([]samecommon.ListUserInfo, error) {
@@ -762,25 +759,25 @@ func listUsers(db *sql.DB, auth *samecommon.AuthInfo) ([]samecommon.ListUserInfo
 	return result, nil
 }
 
-func addUser(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, username string, role int) (string, error) {
+func addUser(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, username string, role int) ([]byte, error) {
 	if verbose {
 		fmt.Println("Attempting to add User " + username + " with role: " + samecommon.RoleFlagsToString(role))
 	}
 	if (auth.Role & samecommon.RoleAdmin) == 0 {
-		return "", errors.New("Permission denied: User is not assigned to the admin role.")
+		return nil, errors.New("Permission denied: User is not assigned to the admin role.")
 	}
 	tx, err := db.Begin()
 	if err != nil {
-		return "", errors.New("addUser: " + err.Error())
+		return nil, errors.New("addUser: " + err.Error())
 	}
 	cmd := "SELECT userid FROM user WHERE username = ?;"
 	stmtSelExisting, err := tx.Prepare(cmd)
 	if err != nil {
-		return "", errors.New("addUser: " + err.Error())
+		return nil, errors.New("addUser: " + err.Error())
 	}
 	rowsExisting, err := stmtSelExisting.Query(username)
 	if err != nil {
-		return "", errors.New("addUser: " + err.Error())
+		return nil, errors.New("addUser: " + err.Error())
 	}
 	defer rowsExisting.Close()
 	var userid int64
@@ -788,49 +785,36 @@ func addUser(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, username strin
 	for rowsExisting.Next() {
 		err = rowsExisting.Scan(&userid)
 		if err != nil {
-			return "", errors.New("addUser: " + err.Error())
+			return nil, errors.New("addUser: " + err.Error())
 		}
 	}
-	var password string
+	passwordStore, passwordCR, pwsalt, pwhash, challengeresponsekey, err := generateUserPasswordSet()
 	if userid == 0 {
-		password, err = generatePassword()
 		if err != nil {
 			err2 := tx.Rollback()
 			if err2 != nil {
-				return "", errors.New("addUser: " + err2.Error())
+				return nil, errors.New("addUser: " + err2.Error())
 			} else {
-				return "", errors.New("addUser: " + err.Error())
+				return nil, errors.New("addUser: " + err.Error())
 			}
 		}
-		pwSaltBin, err := generatePwSalt()
-		if err != nil {
-			err2 := tx.Rollback()
-			if err2 != nil {
-				return "", errors.New("addUser: " + err2.Error())
-			} else {
-				return "", errors.New("addUser: " + err.Error())
-			}
-		}
-		pwsalt := hex.EncodeToString(pwSaltBin)
-		pwHashBin := samecommon.CalculatePwHash(pwSaltBin, password)
-		pwhash := hex.EncodeToString(pwHashBin)
-		cmd = "INSERT INTO user (username, pwsalt, pwhash, role) VALUES (?, ?, ?, ?);"
+		cmd = "INSERT INTO user (username, pwsalt, pwhash, challengeresponsekey, role) VALUES (?, ?, ?, ?, ?);"
 		stmtIns, err := tx.Prepare(cmd)
 		if err != nil {
 			err2 := tx.Rollback()
 			if err2 != nil {
-				return "", errors.New("addUser: " + err2.Error())
+				return nil, errors.New("addUser: " + err2.Error())
 			} else {
-				return "", errors.New("addUser: " + err.Error())
+				return nil, errors.New("addUser: " + err.Error())
 			}
 		}
-		_, err = stmtIns.Exec(username, pwsalt, pwhash, role)
+		_, err = stmtIns.Exec(username, pwsalt, pwhash, challengeresponsekey, role)
 		if err != nil {
 			err2 := tx.Rollback()
 			if err2 != nil {
-				return "", errors.New("addUser: " + err2.Error())
+				return nil, errors.New("addUser: " + err2.Error())
 			} else {
-				return "", errors.New("addUser: " + err.Error())
+				return nil, errors.New("addUser: " + err.Error())
 			}
 		}
 		if verbose {
@@ -839,20 +823,21 @@ func addUser(verbose bool, db *sql.DB, auth *samecommon.AuthInfo, username strin
 	} else {
 		err := tx.Rollback()
 		if err != nil {
-			return "", errors.New("addUser: " + err.Error())
+			return nil, errors.New("addUser: " + err.Error())
 		}
 		if verbose {
 			fmt.Println("    User already exists")
 		}
-		return "", errors.New("addUser: User already exists.")
+		return nil, errors.New("addUser: User already exists.")
 	}
 	err = tx.Commit()
 	if err != nil {
-		return password, errors.New("addUser: " + err.Error())
+		return nil, errors.New("addUser: " + err.Error())
 	}
 	if verbose {
 		fmt.Println("    User " + username + " added with role:" + samecommon.RoleFlagsToString(role))
 	}
+	password := passwordPiecesToPassword(passwordStore, passwordCR)
 	return password, nil
 }
 
@@ -1656,63 +1641,57 @@ func markFileDeleted(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *
 }
 
 // Returns: new generated password. (Remember, users are not allowed to choose their own passwords.)
-func resetUserPassword(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *samecommon.AuthInfo, username string) (string, error) {
+func resetUserPassword(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *samecommon.AuthInfo, username string) ([]byte, error) {
 	fmt.Println("Resetting user password for:", username)
 	cmd := "SELECT userid FROM user WHERE (username = ?);"
 	stmtSel, err := db.Prepare(cmd)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	rows, err := stmtSel.Query(username)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	var userid int64
 	userid = 0
 	for rows.Next() {
 		err = rows.Scan(&userid)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 	}
 	if auth.UserId == 0 {
-		return "", errors.New("ResetUserPassword: User " + `"` + username + `"` + " not found.")
+		return nil, errors.New("ResetUserPassword: User " + `"` + username + `"` + " not found.")
 	}
 	if verbose {
 		fmt.Println("    User ID is:", userid)
 	}
 	if auth.UserId == 0 {
-		return "", errors.New("ResetUserPassword: Not logged in.")
+		return nil, errors.New("ResetUserPassword: Not logged in.")
 	}
 	if (auth.UserId & samecommon.RoleAdmin) == 0 {
 		// not admin -- is user resetting their own password?
 		if auth.UserId != userid {
-			return "", errors.New("ResetUserPassword: Permission denied.")
+			return nil, errors.New("ResetUserPassword: Permission denied.")
 		}
 	}
 	// Ok, if we got here, we are going to proceed with the password reset
-	password, err := generatePassword()
+	passwordStore, passwordCR, pwsalt, pwhash, challengeresponsekey, err := generateUserPasswordSet()
 	if err != nil {
-		return "", errors.New("ResetUserPassword: " + err.Error())
+		return nil, errors.New("ResetUserPassword: " + err.Error())
 	}
-	pwSaltBin, err := generatePwSalt()
-	if err != nil {
-		return "", errors.New("ResetUserPassword: " + err.Error())
-	}
-	pwsalt := hex.EncodeToString(pwSaltBin)
-	pwHashBin := samecommon.CalculatePwHash(pwSaltBin, password)
-	pwhash := hex.EncodeToString(pwHashBin)
 	tx, err := db.Begin()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	cmd = "UPDATE user SET pwsalt = ?, pwhash = ? WHERE userid = ?;"
+	cmd = "UPDATE user SET pwsalt = ?, pwhash = ?, challengeresponsekey = ? WHERE userid = ?;"
 	stmtUpd, err := tx.Prepare(cmd)
-	_, err = stmtUpd.Exec(pwsalt, pwhash, userid)
+	_, err = stmtUpd.Exec(pwsalt, pwhash, challengeresponsekey, userid)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	err = tx.Commit()
+	password := passwordPiecesToPassword(passwordStore, passwordCR)
 	if verbose {
 		fmt.Println("    Password reset to:", password)
 	}
@@ -1851,7 +1830,11 @@ func unmLogin(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB
 	if err != nil {
 		return err
 	}
-	err = login(verbose, db, wnet, auth, username)
+	password, err := rpc.GetByteArray(0, 0, 1)
+	if err != nil {
+		return err
+	}
+	err = login(verbose, db, wnet, auth, username, password)
 	wrpc.SendReplyVoid("Login", version, errorToString(err), wnet)
 	return nil
 }
@@ -1898,10 +1881,10 @@ func unmAddUser(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.
 	reply := wrpc.NewDB()
 	reply.StartDB("AddUserReply", 0, 1)
 	reply.StartTable("", 2, 1)
-	reply.AddColumn("", wrpc.ColString)
+	reply.AddColumn("", wrpc.ColByteArray)
 	reply.AddColumn("", wrpc.ColString)
 	reply.StartRow()
-	reply.AddRowColumnString(password)
+	reply.AddRowColumnByteArray(password)
 	reply.AddRowColumnString(errorToString(err))
 	err = reply.SendDB(wnet)
 	return err
@@ -2121,7 +2104,7 @@ func unmResetUserPassword(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection
 		return err
 	}
 	password, err := resetUserPassword(verbose, db, wnet, auth, username)
-	return wrpc.SendReplyScalarString("ResetUserPassword", version, password, errorToString(err), wnet)
+	return wrpc.SendReplyScalarByteArray("ResetUserPassword", version, password, errorToString(err), wnet)
 }
 
 func unmUploadAllHashes(version int, rpc wrpc.IWRPC, wnet wrpc.IWNetConnection, db *sql.DB, auth *samecommon.AuthInfo, verbose bool) error {
@@ -2279,7 +2262,7 @@ func main() {
 	showKeys := *kflag
 	createAdmin := *aflag
 	if verbose {
-		fmt.Println("samed version 0.4.10")
+		fmt.Println("samed version 0.5.1")
 		fmt.Println("Flags:")
 		fmt.Println("    Generate key mode:", onOff(generateKeys))
 		fmt.Println("    Initialize:", onOff(initialize))
@@ -2327,7 +2310,8 @@ func main() {
 			fmt.Println(err)
 			return
 		}
-		fmt.Println(hex.EncodeToString(symkey))
+		fmt.Print("Server key: ")
+		fmt.Print(hex.EncodeToString(symkey))
 		fmt.Println(hex.EncodeToString(hmackey))
 		samecommon.SetNameValuePair(db, "symmetrickey", hex.EncodeToString(symkey))
 		samecommon.SetNameValuePair(db, "hmackey", hex.EncodeToString(hmackey))
@@ -2407,7 +2391,8 @@ func main() {
 		return
 	}
 	if showKeys {
-		fmt.Println(hex.EncodeToString(symkey))
+		fmt.Print("Server key: ")
+		fmt.Print(hex.EncodeToString(symkey))
 		fmt.Println(hex.EncodeToString(hmackey))
 		return
 	}
