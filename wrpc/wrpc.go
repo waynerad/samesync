@@ -1049,6 +1049,18 @@ func NewConnection() IWNetConnection {
 
 // Helper functions to speed things up -- Server Side
 
+func SendReplyScalarBool(funcname string, version int, result bool, errmsg string, wnet IWNetConnection) error {
+	var reply XWRPC
+	reply.StartDB(funcname+"Reply", version, 1)
+	reply.StartTable("", 1, 2)
+	reply.AddColumn("", ColBool)
+	reply.AddColumn("", ColString)
+	reply.StartRow()
+	reply.AddRowColumnBool(result)
+	reply.AddRowColumnString(errmsg)
+	return reply.SendDB(wnet)
+}
+
 func SendReplyScalarInt(funcname string, version int, result int64, errmsg string, wnet IWNetConnection) error {
 	var reply XWRPC
 	reply.StartDB(funcname+"Reply", version, 1)
@@ -1069,6 +1081,18 @@ func SendReplyScalarString(funcname string, version int, result string, errmsg s
 	reply.AddColumn("", ColString)
 	reply.StartRow()
 	reply.AddRowColumnString(result)
+	reply.AddRowColumnString(errmsg)
+	return reply.SendDB(wnet)
+}
+
+func SendReplyScalarByteArray(funcname string, version int, result []byte, errmsg string, wnet IWNetConnection) error {
+	var reply XWRPC
+	reply.StartDB(funcname+"Reply", version, 1)
+	reply.StartTable("", 1, 2)
+	reply.AddColumn("", ColByteArray)
+	reply.AddColumn("", ColString)
+	reply.StartRow()
+	reply.AddRowColumnByteArray(result)
 	reply.AddRowColumnString(errmsg)
 	return reply.SendDB(wnet)
 }
@@ -1110,16 +1134,16 @@ func StandardReply(wnet IWNetConnection, fcname string) (IWRPC, error) {
 	return reply, nil
 }
 
-// Use this function if you are expecting a single string value back as your
+// Use this function if you are expecting a single bool value back as your
 // reply to an RPC call.
-func StandardStringReply(wnet IWNetConnection, fcname string) (string, error) {
+func StandardBoolReply(wnet IWNetConnection, fcname string) (bool, error) {
 	reply, err := StandardReply(wnet, fcname)
 	if err != nil {
-		return "", err
+		return false, err
 	}
-	result, err := reply.GetString(0, 0, 0)
+	result, err := reply.GetBool(0, 0, 0)
 	if err != nil {
-		return "", err
+		return false, err
 	}
 	errmsg, err := reply.GetString(0, 0, 1)
 	if err != nil {
@@ -1141,6 +1165,48 @@ func StandardIntReply(wnet IWNetConnection, fcname string) (int64, error) {
 	result, err := reply.GetInt(0, 0, 0)
 	if err != nil {
 		return 0, err
+	}
+	errmsg, err := reply.GetString(0, 0, 1)
+	if err != nil {
+		return result, err
+	}
+	if errmsg != "" {
+		return result, errors.New(errmsg)
+	}
+	return result, nil
+}
+
+// Use this function if you are expecting a single string value back as your
+// reply to an RPC call.
+func StandardStringReply(wnet IWNetConnection, fcname string) (string, error) {
+	reply, err := StandardReply(wnet, fcname)
+	if err != nil {
+		return "", err
+	}
+	result, err := reply.GetString(0, 0, 0)
+	if err != nil {
+		return "", err
+	}
+	errmsg, err := reply.GetString(0, 0, 1)
+	if err != nil {
+		return result, err
+	}
+	if errmsg != "" {
+		return result, errors.New(errmsg)
+	}
+	return result, nil
+}
+
+// Use this function if you are expecting a single byte array value back as your
+// reply to an RPC call.
+func StandardByteArrayReply(wnet IWNetConnection, fcname string) ([]byte, error) {
+	reply, err := StandardReply(wnet, fcname)
+	if err != nil {
+		return nil, err
+	}
+	result, err := reply.GetByteArray(0, 0, 0)
+	if err != nil {
+		return nil, err
 	}
 	errmsg, err := reply.GetString(0, 0, 1)
 	if err != nil {
