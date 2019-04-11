@@ -225,8 +225,10 @@ func FileExists(filepath string) (bool, error) {
 	return true, err
 }
 
-func CalculatePwHash(pwsalt []byte, password string) []byte {
-	combo := append(pwsalt, []byte(password)...)
+func CalculatePwHash(pwsalt []byte, password []byte) []byte {
+	saltdup := make([]byte, len(pwsalt), len(pwsalt)+len(password))
+	copy(saltdup, pwsalt)
+	combo := append(saltdup, password...)
 	sum := sha256.Sum256([]byte(combo))
 	result := make([]byte, 32)
 	// copy(result,sum) -- gives error second argument to copy should be slice or string; have [32]byte
@@ -235,3 +237,14 @@ func CalculatePwHash(pwsalt []byte, password string) []byte {
 	}
 	return result
 }
+
+// func candeleteoldCalculatePwHash(pwsalt []byte, password string) []byte {
+//	combo := append(pwsalt, []byte(password)...)
+//	sum := sha256.Sum256([]byte(combo))
+//	result := make([]byte, 32)
+//	// copy(result,sum) -- gives error second argument to copy should be slice or string; have [32]byte
+//	for ii := 0; ii < 32; ii++ {
+//		result[ii] = sum[ii]
+//	}
+//	return result
+// }
