@@ -582,7 +582,9 @@ func rpcGetServerTreeForSyncPoint(wnet wrpc.IWNetConnection, syncpublicid string
 func sendFile(verbose bool, wnet wrpc.IWNetConnection, syncpublicid string, localdir string, localfilepath string, filehash string, serverTimeOffset int64, endToEndEncryption bool, endToEndIV []byte, endToEndSymmetricKey []byte, endToEndHmacKey []byte) error {
 	info, err := os.Stat(localfilepath)
 	if err != nil {
-		return err
+		fmt.Println(err)
+		return errors.New("CANNOT_STAT")
+		// return err
 	}
 	if info.IsDir() {
 		fmt.Println("localfilepath", localfilepath)
@@ -705,6 +707,7 @@ func sendFile(verbose bool, wnet wrpc.IWNetConnection, syncpublicid string, loca
 					}
 					endToEndHasher.Write(endToEndBuffer[:n])
 				} else {
+
 					// Yes, we make the file size 16 bytes larger.
 					// (Actually 48 when you include the HMAC signature.)
 					// The server won't know.
@@ -718,6 +721,7 @@ func sendFile(verbose bool, wnet wrpc.IWNetConnection, syncpublicid string, loca
 					endToEndHasher = hmac.New(sha256.New, endToEndHmacKey)
 					endToEndHasher.Write(endToEndBuffer[:offset])
 					endToEndIvSent = true
+
 				}
 			} else {
 				err = wnet.ShoveBytes(buffer[:n], ciphertext[:n])
@@ -738,6 +742,25 @@ func sendFile(verbose bool, wnet wrpc.IWNetConnection, syncpublicid string, loca
 	}
 	fh.Close()
 	if endToEndEncryption {
+		if !endToEndIvSent {
+			// If this happens, it means we have a 0-byte file. We
+			// could do a call to to ShoveBytes just for the IV
+			// before we start sending the file, but that would
+			// cause an unnecessary packet round-trip across the
+			// network just for the IV for every file, and that's
+			// not an efficient way to do it because the vast
+			// majority of files are not 0-byte files. So we
+			// duplicate some code here to special-case the 0-byte
+			// files.
+			offset := copy(endToEndBuffer, endToEndIvOutgoing)
+			err = wnet.ShoveBytes(endToEndBuffer[:offset], ciphertext[:offset])
+			if err != nil {
+				return err
+			}
+			endToEndHasher = hmac.New(sha256.New, endToEndHmacKey)
+			endToEndHasher.Write(endToEndBuffer[:offset])
+			endToEndIvSent = true
+		}
 		signature := endToEndHasher.Sum(nil)
 		err = wnet.ShoveBytes(signature, ciphertext[:len(signature)])
 	}
@@ -1570,11 +1593,48 @@ func retrieveTreeFromDB(verbose bool, db *sql.DB) []samecommon.SameFileInfo {
 		rows.Scan(&fileid, &filepath, &filesize, &filetime, &filehash)
 		result = append(result, samecommon.SameFileInfo{filepath, filesize, filetime, filehash, false})
 	}
-
 	err = tx.Commit()
 	checkError(err)
 
 	return result
+}
+
+func removeExtraneousFileFromLocalDB(verbose bool, db *sql.DB, filepath string) error {
+	if verbose {
+		fmt.Println("Removing extranneous file from local DB:", filepath)
+	}
+	cmd := "SELECT fileid FROM fileinfo WHERE filepath = ?;"
+	stmtSel, err := db.Prepare(cmd)
+	checkError(err)
+	rows, err := stmtSel.Query(filepath)
+	var fileid int64
+	fileid = 0
+	for rows.Next() {
+		rows.Scan(&fileid)
+	}
+	if fileid == 0 {
+		panic("filepath not found in local DB when attempting to remove extraneous file from local DB")
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	cmd = "DELETE FROM fileinfo WHERE fileid = ?;"
+	stmtDel, err := tx.Prepare(cmd)
+	if err != nil {
+		tx.Rollback()
+		fmt.Fprintln(os.Stderr, err)
+		return err
+	}
+	_, err = stmtDel.Exec(fileid)
+	if err != nil {
+		tx.Rollback()
+		fmt.Fprintln(os.Stderr, err)
+		return err
+	}
+	err = tx.Commit()
+	checkError(err)
+	return nil
 }
 
 func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpublicid string, localPath string, localTree []samecommon.SameFileInfo, remotePath string, remoteTree []samecommon.SameFileInfo, serverTimeOffset int64, runForever bool, endToEndEncryption bool, endToEndIV []byte, endToEndSymmetricKey []byte, endToEndHmacKey []byte) {
@@ -1728,8 +1788,15 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 				filehash := localTree[toUploadLocal].FileHash
 				err := sendFile(verbose, wnet, syncpublicid, localPath, localfilepath, filehash, serverTimeOffset, endToEndEncryption, endToEndIV, endToEndSymmetricKey, endToEndHmacKey)
 				if err != nil {
-					fmt.Fprintln(os.Stderr, err)
-					return
+					if err.Error() != "CANNOT_STAT" {
+						fmt.Fprintln(os.Stderr, err)
+						return
+					}
+					err = removeExtraneousFileFromLocalDB(verbose, db, localTree[toUploadLocal].FilePath)
+					if err != nil {
+						fmt.Fprintln(os.Stderr, err)
+						return
+					}
 				}
 			}
 		}
@@ -1864,6 +1931,7 @@ func recalculateAllFileHashes(verbose bool, db *sql.DB, rootPath string) {
 		return
 	}
 	err = tx.Commit()
+	checkError(err)
 	// And now proceed as normal!
 	if verbose {
 		fmt.Println("Recalculating all file hashes")
@@ -2333,7 +2401,7 @@ func main() {
 	showEndToEndKeys := *xflag
 	runForever := *zflag
 	if verbose {
-		fmt.Println("same version 0.5.1")
+		fmt.Println("same version 0.5.2")
 		fmt.Println("Command line flags:")
 		fmt.Println("    Initialize mode:", onOff(initialize))
 		fmt.Println("    Configure mode:", onOff(configure))

@@ -2262,7 +2262,7 @@ func main() {
 	showKeys := *kflag
 	createAdmin := *aflag
 	if verbose {
-		fmt.Println("samed version 0.5.1")
+		fmt.Println("samed version 0.5.2")
 		fmt.Println("Flags:")
 		fmt.Println("    Generate key mode:", onOff(generateKeys))
 		fmt.Println("    Initialize:", onOff(initialize))
