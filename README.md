@@ -92,16 +92,16 @@ $ same -a
 
 and enter the admin password. Once in admin mode, the following commands will become available:
 
-show users -- shows what user accounts the server recognizes. Quick Setup creates a user called "everybody", but you can create user accounts that identify individuals.
-show syncpoints -- shows which directories are being synchronized. These are called syncpoints (the directory on the server act as a synrchonization point for multiple clients synchronizing that directory). The server can handle multiple syncpoints.
-show grants -- shows what users have access to what syncpoints. Users can be given read-only access instead of read-write. The Quick Setup process gives user "everybody" read-write access.
-add user -- adds a user account to the server.
-add syncpoint -- adds a syncpoint to the server. The syncpoint has a long hexadecimal ID that you will use to identify it in other commands.
-add grant -- grants a user access to a sync point. Access can be read-only or read-write. You'll need the username (email) of the user account and the ID (long hexadecimal code) of the syncpoint.
-del user -- deletes a user from the server.
-del syncpoint -- deletes a syncpoint.
-del grant -- takes access to a syncpoint away from a user.
-reset password -- resets the password for a user on the server.
+* show users -- shows what user accounts the server recognizes. Quick Setup creates a user called "everybody", but you can create user accounts that identify individuals.
+* show syncpoints -- shows which directories are being synchronized. These are called syncpoints (the directory on the server act as a synrchonization point for multiple clients synchronizing that directory). The server can handle multiple syncpoints.
+* show grants -- shows what users have access to what syncpoints. Users can be given read-only access instead of read-write. The Quick Setup process gives user "everybody" read-write access.
+* add user -- adds a user account to the server.
+* add syncpoint -- adds a syncpoint to the server. The syncpoint has a long hexadecimal ID that you will use to identify it in other commands.
+* add grant -- grants a user access to a sync point. Access can be read-only or read-write. You'll need the username (email) of the user account and the ID (long hexadecimal code) of the syncpoint.
+* del user -- deletes a user from the server.
+* del syncpoint -- deletes a syncpoint.
+* del grant -- takes access to a syncpoint away from a user.
+* reset password -- resets the password for a user on the server.
 
 The admin mode also has a command "local show config" that shows the client's local configuration, if you need to consult it will executing admin mode commands on the server.
 
