@@ -1,5 +1,5 @@
-# sameSync
-SameSync synchronizes files between machines and makes them the same.
+# samesync
+samesync synchronizes files between machines and makes them the same.
 
 * All communication encrypted with AES256.
 * SHA256 used for keyed hash message authentication codes.
@@ -16,6 +16,95 @@ SameSync synchronizes files between machines and makes them the same.
 * Only dependency other than the Go standard library is sqlite3.
 * Server does not use Go panics and handles errors gracefully without crashing.
 * I've been using it to sync my own files since February 23, 2019.
+
+# Quick Setup
+
+Preliminaries: If you need to install Go, follow the instructions at https://golang.org/ .
+
+If you get an error message about missing header.h during this setup process, fix it with:
+
+$ sudo apt-get install g++
+
+If you get an error saying git is missing, install with:
+
+$ sudo apt install git
+
+You will need sqlite3. This is the one external dependency beyond the standard Go libraries and the packages that come with this GitHub repository.
+
+$ go get github.com/mattn/go-sqlite3
+
+Ok, now let's get on with the setup process:
+
+1. Get the code
+
+2. Build wrpc. This is the package that handles the actual encrypted RPC calls. Create a directory called "wrpc" in your go/src directory. Copy the contents of the "wrpc" directory from this project in there (wrpc.go and wrpc_test.go). In go/src/wrpc:
+
+$ go test
+$ go install
+
+3. Build samecommon. This is the package that has common functions between the client and server. Create a directory called "samecommon" in your go/src directory. Copy samecommon.go into this directory. In go/src/samecommon:
+
+$ go install
+
+4. Now, with the required packages installed, you just need to build the commands that you will run from the command line. To do this, cd into the "same" directory. Once the binaries are built, you'll need to move them to your executable directory. For me it ~/bin. If your executable directory is ~/bin, the instructions would be:
+
+$ go build same.go
+$ go build samed.go
+$ mv same ~/bin
+$ mv samed ~/bin
+
+5. You'll need to do this on every machine (client and server). You can skip building the server executable (samed) on servers and you can skip building the client executable (same) on clients.
+
+6. To set up the server: Create a subdirectory for the server to run in, and create a subdirectory under that for actually storing the files. The server will create a directory in a file called sameserver.db and you will need a subdirectory for each synchronized directory you synchronize between clients. This "Quick Setup" process will set up the first one. You'll also need to decide what port number to run the server on. Once you are ready, just type:
+
+$ samed -q
+
+This will create a file called samed.conf that you take to the clients. When you are ready to run the server, just use
+
+$ samed
+
+This can be combined with nohup to make a server that stays up all the time.
+
+On the client, place the same.conf file one directory UP from the directory you want synchronized.
+
+$ same -q
+
+On the first client, end-to-end encryption keys will be generated and added to the file. Copy this new same.conf file to all the other clients so they all use the same end-to-end encryption key. Be careful copying this file across the network: make sure you use scp or WinSCP or some other secure copy system, as this file contains encryption keys -- the best thing is to use sneakernet and move the file from machine to machine manually such as on a USB stick.
+
+Once the clients are set up, you synchronize them just by typing "same".
+
+$ same
+
+At this point, the system should be set up and all you have to do is type "same". You should delete all same.conf files.
+
+
+# Setup for complex scenarios
+
+If you need more complex scenarios, you will need to create an admin account. On the server:
+
+$ samed -a
+
+It will give you an admin password.
+
+On the client, log in with:
+
+$ same -a
+
+and enter the admin password. Once in admin mode, the following commands will become available:
+
+show users -- shows what user accounts the server recognizes. Quick Setup creates a user called "everybody", but you can create user accounts that identify individuals.
+show syncpoints -- shows which directories are being synchronized. These are called syncpoints (the directory on the server act as a synrchonization point for multiple clients synchronizing that directory). The server can handle multiple syncpoints.
+show grants -- shows what users have access to what syncpoints. Users can be given read-only access instead of read-write. The Quick Setup process gives user "everybody" read-write access.
+add user -- adds a user account to the server.
+add syncpoint -- adds a syncpoint to the server. The syncpoint has a long hexadecimal ID that you will use to identify it in other commands.
+add grant -- grants a user access to a sync point. Access can be read-only or read-write. You'll need the username (email) of the user account and the ID (long hexadecimal code) of the syncpoint.
+del user -- deletes a user from the server.
+del syncpoint -- deletes a syncpoint.
+del grant -- takes access to a syncpoint away from a user.
+reset password -- resets the password for a user on the server.
+
+The admin mode also has a command "local show config" that shows the client's local configuration, if you need to consult it will executing admin mode commands on the server.
+
 
 # Issues
 
