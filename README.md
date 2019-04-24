@@ -40,6 +40,7 @@ Ok, now let's get on with the setup process:
 2. Build wrpc. This is the package that handles the actual encrypted RPC calls. Create a directory called "wrpc" in your go/src directory. Copy the contents of the "wrpc" directory from this project in there (wrpc.go and wrpc_test.go). In go/src/wrpc:
 
 $ go test
+
 $ go install
 
 3. Build samecommon. This is the package that has common functions between the client and server. Create a directory called "samecommon" in your go/src directory. Copy samecommon.go into this directory. In go/src/samecommon:
@@ -49,8 +50,11 @@ $ go install
 4. Now, with the required packages installed, you just need to build the commands that you will run from the command line. To do this, cd into the "same" directory. Once the binaries are built, you'll need to move them to your executable directory. For me it ~/bin. If your executable directory is ~/bin, the instructions would be:
 
 $ go build same.go
+
 $ go build samed.go
+
 $ mv same ~/bin
+
 $ mv samed ~/bin
 
 5. You'll need to do this on every machine (client and server). You can skip building the server executable (samed) on servers and you can skip building the client executable (same) on clients.
