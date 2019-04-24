@@ -48,17 +48,6 @@ func onOff(bv bool) string {
 // generate 32 bytes. But they're all separate functions, because
 // conceptually they generate different things.
 
-func candeleteGeneratePassword() (string, error) {
-	key := make([]byte, 32)
-	_, err := rand.Read(key)
-	if err != nil {
-		return "", err
-	}
-	password := make([]byte, 46)
-	num := ascii85.Encode(password, key)
-	return string(password[:num]), err
-}
-
 func generatePwSalt() ([]byte, error) {
 	key := make([]byte, 32)
 	_, err := rand.Read(key)
@@ -234,21 +223,22 @@ func passwordPiecesToPassword(passwordStore []byte, passwordCR []byte) []byte {
 	return combo
 }
 
-func createTheAdminAccount(db *sql.DB, verbose bool) error {
-	fmt.Println("Creating admin account.")
-	username := "admin"
+func createBuiltInAccount(verbose bool, db *sql.DB, username string, role int) (string, error) {
+	if verbose {
+		fmt.Println("Creating built-in account called:", username)
+	}
 	tx, err := db.Begin()
 	if err != nil {
-		return err
+		return "", err
 	}
 	cmd := "SELECT userid FROM user WHERE username = ?;"
 	stmtSelExisting, err := tx.Prepare(cmd)
 	if err != nil {
-		return err
+		return "", err
 	}
 	rowsExisting, err := stmtSelExisting.Query(username)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer rowsExisting.Close()
 	var userid int64
@@ -256,48 +246,47 @@ func createTheAdminAccount(db *sql.DB, verbose bool) error {
 	for rowsExisting.Next() {
 		err = rowsExisting.Scan(&userid)
 		if err != nil {
-			return err
+			return "", err
 		}
 	}
 	passwordStore, passwordCR, pwsalt, pwhash, challengeresponsekey, err := generateUserPasswordSet()
 	if err != nil {
 		err2 := tx.Rollback()
 		if err2 != nil {
-			return err2
+			return "", err2
 		} else {
-			return err
+			return "", err
 		}
 	}
-	role := samecommon.RoleAdmin
 	if userid == 0 {
 		cmd = "INSERT INTO user (username, pwsalt, pwhash, challengeresponsekey, role) VALUES (?, ?, ?, ?, ?);"
 		stmtIns, err := tx.Prepare(cmd)
 		if err != nil {
-			return err
+			return "", err
 		}
 		_, err = stmtIns.Exec(username, pwsalt, pwhash, challengeresponsekey, role)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if verbose {
-			fmt.Println("    Admin account created.")
+			fmt.Println("    Built-in account created.")
 		}
 	} else {
 		cmd = "UPDATE user SET username = ?, pwsalt = ?, pwhash = ?, challengeresponsekey = ?, role = ? WHERE userid = ?;"
 		stmtUpd, err := tx.Prepare(cmd)
 		_, err = stmtUpd.Exec(username, pwsalt, pwhash, challengeresponsekey, role, userid)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if verbose {
-			fmt.Println("    Admin account already exists.")
-			fmt.Println("    Admin account reset.")
+			fmt.Println("    Built-in account ", `"`+username+`"`, "already exists.")
+			fmt.Println("    Account reset.")
 		}
 	}
 	err = tx.Commit()
 	password := passwordPiecesToPassword(passwordStore, passwordCR)
 	if verbose {
-		fmt.Println("    Admin account created:")
+		fmt.Println("    Account created:")
 		fmt.Println("        username (username): ", username)
 		fmt.Println("        password: ", password)
 		fmt.Println("        password salt: ", pwsalt)
@@ -307,8 +296,10 @@ func createTheAdminAccount(db *sql.DB, verbose bool) error {
 	passwEncodeBin := make([]byte, 86)
 	num := ascii85.Encode(passwEncodeBin, password)
 	asciiPassword := string(passwEncodeBin[:num])
-	fmt.Println("Admin password is:", asciiPassword)
-	return err
+	if username == "admin" {
+		fmt.Println("Admin password is:", asciiPassword)
+	}
+	return asciiPassword, err
 }
 
 func isDirEmpty(path string, verbose bool) (bool, error) {
@@ -514,6 +505,12 @@ func convertFilePathToLocalStoragePath(filepath string) string {
 	return result
 }
 
+func generateTemporaryFileName() (string, error) {
+	rndbts := make([]byte, 16)
+	_, err := rand.Read(rndbts)
+	return "temp_temp_" + hex.EncodeToString(rndbts), err
+}
+
 // ----------------------------------------------------------------
 // functions callable remotely
 // ----------------------------------------------------------------
@@ -550,8 +547,12 @@ func receiveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *same
 	// Step 3: Actually receive the bytes of the file
 	// While the reply is headed out, we go ahead and start reading
 	// the actual file bytes coming in
+	tempFileName, err := generateTemporaryFileName()
+	if err != nil {
+		return "", errors.New("receiveFile: generateTemporaryFileName: " + err.Error())
+	}
 	var fhOut *os.File
-	fhOut, err = os.Create(localpath + string(os.PathSeparator) + "temp.temp")
+	fhOut, err = os.Create(localpath + string(os.PathSeparator) + tempFileName)
 	if err != nil {
 		return "", errors.New("receiveFile: file create: " + err.Error())
 	}
@@ -587,18 +588,17 @@ func receiveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *same
 	// Step 4: Rename the file to slot it in place, replacing the
 	// existing file, which we have preserved until now in case
 	// anything went wrong.
-	// err = os.Rename(localpath+string(os.PathSeparator)+"temp.temp", localpath+samecommon.MakePathSeparatorsForThisOS(filepath))
 	localstorage := convertFilePathToLocalStoragePath(filepath)
 	if verbose {
 		fmt.Println("    Local storage:", localstorage)
 	}
-	err = os.Rename(localpath+string(os.PathSeparator)+"temp.temp", localpath+samecommon.MakePathSeparatorsForThisOS(localstorage))
+	err = os.Rename(localpath+string(os.PathSeparator)+tempFileName, localpath+samecommon.MakePathSeparatorsForThisOS(localstorage))
 	if err != nil {
 		mkerr := samecommon.MakePathForFile(localpath + samecommon.MakePathSeparatorsForThisOS(localstorage))
 		if mkerr != nil {
 			return "", errors.New("receiveFile: make path: " + err.Error())
 		}
-		mverr := os.Rename(localpath+string(os.PathSeparator)+"temp.temp", localpath+samecommon.MakePathSeparatorsForThisOS(localstorage))
+		mverr := os.Rename(localpath+string(os.PathSeparator)+tempFileName, localpath+samecommon.MakePathSeparatorsForThisOS(localstorage))
 		if mverr != nil {
 			return "", errors.New("receiveFile: rename: " + err.Error())
 		}
@@ -2238,13 +2238,308 @@ func handleConnection(conn net.Conn, verose bool, db *sql.DB, symkey []byte, hma
 	}
 }
 
+// ----------------------------------------------------------------
+// end of functions that respond to network connections
+// ----------------------------------------------------------------
+
+// ----------------------------------------------------------------
+// beginning of functions that respond to local user
+// ----------------------------------------------------------------
+
 func trim(stg string) string {
 	return strings.Trim(stg, " \t\n\r")
+}
+
+// All these functions are for the "quick setup" configuration system
+//
+// functions getYesNo and getLine are different from the client versions in the error handling
+
+func getYesNo(reader *bufio.Reader, prompt string) (bool, error) {
+	result := false
+	haveResult := false
+	for !haveResult {
+		fmt.Print(prompt)
+		yesno, err := reader.ReadString('\n')
+		if err != nil {
+			return false, err
+		}
+		if len(yesno) > 0 {
+			yesno = yesno[:1]
+		}
+		if (yesno == "Y") || (yesno == "y") {
+			result = true
+			haveResult = true
+		}
+		if (yesno == "N") || (yesno == "n") {
+			result = false
+			haveResult = true
+		}
+	}
+	return result, nil
 }
 
 func getLine(reader *bufio.Reader) (string, error) {
 	result, err := reader.ReadString('\n')
 	return trim(result), err
+}
+
+func createDB(verbose bool, databaseFileName string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite3", databaseFileName)
+	if err != nil {
+		return db, err
+	}
+	err = initializeSettings(db)
+	if err != nil {
+		return db, err
+	}
+	err = initializeServerTables(db)
+	if err != nil {
+		return db, err
+	}
+	if verbose {
+		fmt.Println("Database initialized.")
+	}
+	return db, nil
+}
+
+func setupPortNumber(verbose bool, db *sql.DB) error {
+	portnum := 0
+	for portnum == 0 {
+		fmt.Print("Port: ")
+		// fmt.Scanln(&ptStr)
+		keyboard := bufio.NewReader(os.Stdin)
+		ptStr, err := getLine(keyboard)
+		if err != nil {
+			return err
+		}
+		portnum = strToInt(ptStr)
+	}
+	samecommon.SetNameValuePair(db, "port", intToStr(portnum))
+	if verbose {
+		fmt.Println("Port number set to", portnum)
+	}
+	return nil
+}
+
+func setupServerKeys(verbose bool, db *sql.DB, outputKeys bool) error {
+	symkey, err := samecommon.GenerateAESKey()
+	if err != nil {
+		return err
+	}
+	hmackey, err := samecommon.GenerateSHAKey()
+	if err != nil {
+		return err
+	}
+	if outputKeys {
+		fmt.Print("Server key: ")
+		fmt.Print(hex.EncodeToString(symkey))
+		fmt.Println(hex.EncodeToString(hmackey))
+	}
+	samecommon.SetNameValuePair(db, "symmetrickey", hex.EncodeToString(symkey))
+	samecommon.SetNameValuePair(db, "hmackey", hex.EncodeToString(hmackey))
+	if verbose {
+		fmt.Println("Symmetric key set to:", hex.EncodeToString(symkey))
+		fmt.Println("HMAC key set to:", hex.EncodeToString(hmackey))
+	}
+	return nil
+}
+
+func setupQuickSetupSyncPoint(verbose bool, db *sql.DB) (string, error) {
+	var err error
+	path := ""
+	for path == "" {
+		fmt.Print("Directory path for sync point (relative path recommended): ")
+		keyboard := bufio.NewReader(os.Stdin)
+		path, err = getLine(keyboard)
+		if err != nil {
+			return "", err
+		}
+		dirEmpty, err := isDirEmpty(path, verbose)
+		if err != nil {
+			fmt.Println(err)
+			path = ""
+			dirEmpty = true // just to make following message go away
+		}
+		if !dirEmpty {
+			fmt.Println("The directory you specified is not empty.")
+			path = ""
+		}
+	}
+	if verbose {
+		fmt.Println("Adding sync point with path", path)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return "", err
+	}
+	cmd := "SELECT syncptid FROM syncpoint WHERE path = ?;"
+	stmtSelExisting, err := tx.Prepare(cmd)
+	if err != nil {
+		return "", err
+	}
+	rowsExisting, err := stmtSelExisting.Query(path)
+	if err != nil {
+		return "", err
+	}
+	defer rowsExisting.Close()
+	var syncptid int64
+	syncptid = 0
+	for rowsExisting.Next() {
+		err = rowsExisting.Scan(&syncptid)
+		if err != nil {
+			return "", err
+		}
+	}
+	var publicid string
+	if syncptid == 0 {
+		publicIdBin, err := generateSyncPointId()
+		if err != nil {
+			return "", err
+		}
+		publicid = hex.EncodeToString(publicIdBin)
+		cmd = "INSERT INTO syncpoint (publicid, path) VALUES (?, ?);"
+		stmtIns, err := tx.Prepare(cmd)
+		if err != nil {
+			return "", err
+		}
+		_, err = stmtIns.Exec(publicid, path)
+		if err != nil {
+			return "", err
+		}
+	} else {
+		err = tx.Rollback()
+		if err != nil {
+			return "", err
+		}
+		return "", errors.New("Sync point already exists.") // this should be IMPOSSIBLE in Quick Setup!
+	}
+	err = tx.Commit()
+	if err != nil {
+		return "", err
+	}
+	if verbose {
+		fmt.Println("    Sync point created with path:", path)
+		fmt.Println("    Public ID:", publicid)
+	}
+	return publicid, nil
+}
+
+func createBuiltInGrant(verbose bool, db *sql.DB, username string, syncpublicid string, access int) error {
+	if verbose {
+		fmt.Println("Creating built-in grant to access to sync point for user.")
+		fmt.Println("    Username (email):", username)
+		fmt.Println("    Sync point ID:", syncpublicid)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	cmd := "SELECT userid FROM user WHERE username = ?;"
+	stmtSelExisting, err := tx.Prepare(cmd)
+	if err != nil {
+		return err
+	}
+	rowsExisting, err := stmtSelExisting.Query(username)
+	if err != nil {
+		return err
+	}
+	defer rowsExisting.Close()
+	var userid int64
+	userid = 0
+	for rowsExisting.Next() {
+		err = rowsExisting.Scan(&userid)
+		if err != nil {
+			return err
+		}
+	}
+	if userid == 0 {
+		err = tx.Rollback()
+		if err != nil {
+			return errors.New("addGrant: " + err.Error())
+		}
+		return errors.New("Username (email) " + `"` + username + `"` + " not found.")
+	}
+	if verbose {
+		fmt.Println("    Found username.")
+	}
+	cmd = "SELECT syncptid FROM syncpoint WHERE publicid = ?;"
+	stmtSelExisting, err = tx.Prepare(cmd)
+	if err != nil {
+		return err
+	}
+	rowsExisting, err = stmtSelExisting.Query(syncpublicid)
+	if err != nil {
+		return err
+	}
+	defer rowsExisting.Close()
+	var syncptid int64
+	syncptid = 0
+	for rowsExisting.Next() {
+		err = rowsExisting.Scan(&syncptid)
+		if err != nil {
+			return err
+		}
+	}
+	if syncptid == 0 {
+		err = tx.Rollback()
+		if err != nil {
+			return err
+		}
+		return errors.New("Share point ID " + `"` + syncpublicid + `"` + " not found.")
+	}
+	if verbose {
+		fmt.Println("    Found share point ID.")
+	}
+	cmd = "SELECT grantid FROM grant WHERE (syncptid = ?) AND (userid = ?);"
+	stmtSelExisting, err = tx.Prepare(cmd)
+	if err != nil {
+		return err
+	}
+	rowsExisting, err = stmtSelExisting.Query(syncptid, userid)
+	if err != nil {
+		return err
+	}
+	defer rowsExisting.Close()
+	var grantid int64
+	grantid = 0
+	for rowsExisting.Next() {
+		err = rowsExisting.Scan(&grantid)
+		if err != nil {
+			return err
+		}
+	}
+	if grantid == 0 {
+		if verbose {
+			fmt.Println("    User is not granted access to sync point. Creating access now.")
+		}
+		cmd = "INSERT INTO grant (syncptid, userid, access) VALUES (?, ?, ?);"
+		stmtIns, err := tx.Prepare(cmd)
+		if err != nil {
+			return errors.New("addGrant: " + err.Error())
+		}
+		_, err = stmtIns.Exec(syncptid, userid, access)
+		if err != nil {
+			return errors.New("addGrant: " + err.Error())
+		}
+	} else {
+		if verbose {
+			fmt.Println("    User is already granted access to sync point. Updating access flags.")
+		}
+		cmd = "UPDATE grant SET access = ? WHERE grantid = ?;"
+		stmtUpd, err := tx.Prepare(cmd)
+		_, err = stmtUpd.Exec(access, grantid)
+		if err != nil {
+			return err
+		}
+	}
+	err = tx.Commit()
+	if err != nil {
+		return err
+	}
+	if verbose {
+		fmt.Println("    User granted access to share.")
+	}
+	return nil
 }
 
 func main() {
@@ -2254,6 +2549,7 @@ func main() {
 	iflag := flag.Bool("i", false, "initialize")
 	pflag := flag.Bool("p", false, "configure port number")
 	aflag := flag.Bool("a", false, "create admin account")
+	qflag := flag.Bool("q", false, "quick setup")
 	flag.Parse()
 	verbose := *vflag
 	configurePort := *pflag
@@ -2261,36 +2557,185 @@ func main() {
 	initialize := *iflag
 	showKeys := *kflag
 	createAdmin := *aflag
+	quickSetup := *qflag
 	if verbose {
-		fmt.Println("samed version 0.5.2")
+		fmt.Println("samed version 0.5.5")
 		fmt.Println("Flags:")
 		fmt.Println("    Generate key mode:", onOff(generateKeys))
 		fmt.Println("    Initialize:", onOff(initialize))
 		fmt.Println("    Show keys:", onOff(showKeys))
 		fmt.Println("    Create admin:", onOff(createAdmin))
+		fmt.Println("    Quick setup:", onOff(quickSetup))
+	}
+	if quickSetup {
+		exist, err := samecommon.FileExists(databaseFileName)
+		if exist {
+			fmt.Println("It looks like a samesync server (samed) database already exists in this")
+			fmt.Println("directory. samed does not need to be set up twice on the same server.")
+			return
+		}
+		fmt.Println("Welcome to the samesync server (samed) quick setup process. You will need the")
+		fmt.Println("following pieces of information:")
+		fmt.Println("")
+		fmt.Println("1. The port number the server will run as. The port needs to be open by the OS")
+		fmt.Println("   and any relevant firewalls.")
+		fmt.Println("")
+		fmt.Println("2. The directory on the server where files in the syncronized directory will be")
+		fmt.Println("   stored. Relative paths (relative to this directory where you are starting")
+		fmt.Println("   samed) are recommended, because they make it easier to move to a different")
+		fmt.Println("   physical machine if you should ever need to do so. The directory needs to")
+		fmt.Println("   allready created before you run quick setup. It also needs to be empty.")
+		fmt.Println("")
+		fmt.Println("The quick setup system will create a configuration file that you can take to")
+		fmt.Println("client machines to set them up quickly. This configuration file contains")
+		fmt.Println("encryption keys and must be securely transported across the network (or")
+		fmt.Println("physically, such as by carrying a USB stick).")
+		fmt.Println("")
+		fmt.Println("To make it harder to gain access if someone should accidentally get hold of a")
+		fmt.Println("configuration file, the name/IP address of the server and the port number are")
+		fmt.Println("not stored in the file. You will still need to type these in manually at each")
+		fmt.Println("client.")
+		fmt.Println("")
+		keyboard := bufio.NewReader(os.Stdin)
+		yes, err := getYesNo(keyboard, "Do you wish to proceed? (y/n) ")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return
+		}
+		if !yes {
+			return
+		}
+		//
+		// 1. Create db
+		//
+		db, err := createDB(verbose, databaseFileName)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return
+		}
+		defer db.Close()
+		//
+		// 2. Set port
+		//
+		err = setupPortNumber(verbose, db)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return
+		}
+		//
+		// 3. Generate server keys
+		//
+		err = setupServerKeys(verbose, db, false)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return
+		}
+		//
+		// 4. Create "everybody" account
+		//
+		password, err := createBuiltInAccount(verbose, db, "everybody", samecommon.RoleSyncPointUser)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return
+		}
+		//
+		// 5. Create syncpoint
+		//
+		publicid, err := setupQuickSetupSyncPoint(verbose, db)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return
+		}
+		//
+		// 6. Grant user "everybody" access to syncpoint
+		//
+		access := samecommon.AccessRead | samecommon.AccessWrite
+		err = createBuiltInGrant(verbose, db, "everybody", publicid, access)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return
+		}
+		//
+		// 7. Write out port, server key, and "everybody" password to config file.
+		//
+		fhConfig, err := os.Create("same.conf")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return
+		}
+		err = samecommon.SetupWriteSettingToConfigFile(fhConfig, "username", "everybody")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return
+		}
+		err = samecommon.SetupWriteSettingToConfigFile(fhConfig, "password", password)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return
+		}
+		err = samecommon.SetupWriteSettingToConfigFile(fhConfig, "syncpointid", publicid)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return
+		}
+		serversymkey, err := samecommon.GetValue(db, "symmetrickey", "missing")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return
+		}
+		err = samecommon.SetupWriteSettingToConfigFile(fhConfig, "serversymkey", serversymkey)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return
+		}
+		serverhmackey, err := samecommon.GetValue(db, "hmackey", "missing")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return
+		}
+		err = samecommon.SetupWriteSettingToConfigFile(fhConfig, "serverhmackey", serverhmackey)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return
+		}
+		fhConfig.Close()
+		//
+		// 8. Closing instructions to user
+		//
+		fmt.Println("")
+		fmt.Println("You should now have a file called same.conf. Take this file to your client")
+		fmt.Println("machines, put it one directory UP from the directory you want to sync (so it is")
+		fmt.Println("../same.conf when you run the program) and run " + `"` + "same -q" + `"` + ". If you put the file")
+		fmt.Println("somewhere other than ../same.conf you will need to specify the file path with")
+		fmt.Println(`"` + "same -q -f <file>" + `"` + ".")
+		fmt.Println("")
+		fmt.Println("The first client where you run same -q will add the end-to-end key to the file.")
+		fmt.Println("This is done at the client so you know the server never has access to the key.")
+		fmt.Println("Once the end-to-end key has been added, you can take that version of the file")
+		fmt.Println("to all other clients.")
+		fmt.Println("")
+		fmt.Println("After all clients are set up, the same.conf files should be deleted.")
+		fmt.Println("")
+		return
 	}
 	if initialize {
-		db, err := sql.Open("sqlite3", databaseFileName)
-		if err != nil {
-			fmt.Println(err)
+		exist, err := samecommon.FileExists(databaseFileName)
+		if exist {
+			fmt.Println("Looks like the database file has already been created.")
 			return
 		}
-		err = initializeSettings(db)
+		db, err := createDB(verbose, databaseFileName)
 		if err != nil {
-			fmt.Println(err)
+			fmt.Fprintln(os.Stderr, err)
 			return
 		}
-		err = initializeServerTables(db)
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
+		defer db.Close()
 		fmt.Println("Initialized.")
 		return
 	}
 	exist, err := samecommon.FileExists(databaseFileName)
 	if err != nil {
-		fmt.Println(err)
+		fmt.Fprintln(os.Stderr, err)
 		return
 	}
 	if !exist {
@@ -2300,57 +2745,34 @@ func main() {
 	db, err := sql.Open("sqlite3", databaseFileName)
 	defer db.Close()
 	if generateKeys {
-		symkey, err := samecommon.GenerateAESKey()
+		err = setupServerKeys(verbose, db, true)
 		if err != nil {
-			fmt.Println(err)
+			fmt.Fprintln(os.Stderr, err)
 			return
-		}
-		hmackey, err := samecommon.GenerateSHAKey()
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
-		fmt.Print("Server key: ")
-		fmt.Print(hex.EncodeToString(symkey))
-		fmt.Println(hex.EncodeToString(hmackey))
-		samecommon.SetNameValuePair(db, "symmetrickey", hex.EncodeToString(symkey))
-		samecommon.SetNameValuePair(db, "hmackey", hex.EncodeToString(hmackey))
-		if verbose {
-			fmt.Println("Symmetric key set to:", hex.EncodeToString(symkey))
-			fmt.Println("HMAC key set to:", hex.EncodeToString(hmackey))
 		}
 		return
 	}
 	if createAdmin {
-		err := createTheAdminAccount(db, verbose)
+		_, err := createBuiltInAccount(verbose, db, "admin", samecommon.RoleAdmin)
 		if err != nil {
-			fmt.Println(err)
+			fmt.Fprintln(os.Stderr, err)
 			return
 		}
 		return
 	}
 	if configurePort {
-		portnum := 0
-		for portnum == 0 {
-			fmt.Print("Port: ")
-			// fmt.Scanln(&ptStr)
-			keyboard := bufio.NewReader(os.Stdin)
-			ptStr, err := getLine(keyboard)
-			if err != nil {
-				fmt.Println(err)
-				return
-			}
-			portnum = strToInt(ptStr)
-		}
-		samecommon.SetNameValuePair(db, "port", intToStr(portnum))
-		if verbose {
-			fmt.Println("Port number set to", portnum)
+		err = setupPortNumber(verbose, db)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
 		}
 		return
 	}
+	//
+	// If we got here, configuration stuff should be done, let's see if we can load everything we need
+	//
 	ptNum, err := samecommon.GetValue(db, "port", "")
 	if err != nil {
-		fmt.Println(err)
+		fmt.Fprintln(os.Stderr, err)
 		return
 	}
 	if verbose {
@@ -2362,19 +2784,17 @@ func main() {
 		fmt.Println("Use samed -p to configure the port number")
 		return
 	}
-
 	symKeyStr, err := samecommon.GetValue(db, "symmetrickey", "")
 	if err != nil {
-		fmt.Println(err)
+		fmt.Fprintln(os.Stderr, err)
 		return
 	}
 	if verbose {
 		fmt.Println("Symmetric key", symKeyStr)
 	}
-
 	hmacKeyStr, err := samecommon.GetValue(db, "hmackey", "")
 	if err != nil {
-		fmt.Println(err)
+		fmt.Fprintln(os.Stderr, err)
 		return
 	}
 	if verbose {
@@ -2382,12 +2802,12 @@ func main() {
 	}
 	symkey, err := hex.DecodeString(symKeyStr)
 	if err != nil {
-		fmt.Println(err)
+		fmt.Fprintln(os.Stderr, err)
 		return
 	}
 	hmackey, err := hex.DecodeString(hmacKeyStr)
 	if err != nil {
-		fmt.Println(err)
+		fmt.Fprintln(os.Stderr, err)
 		return
 	}
 	if showKeys {
@@ -2402,12 +2822,12 @@ func main() {
 		fmt.Println("Use samed -k to export key for clients.")
 		return
 	}
-
+	//
 	// if we got here, we're going to listen for incoming connections!
-
+	//
 	listener, err := net.Listen("tcp", ":"+intToStr(portnum))
 	if err != nil {
-		fmt.Println(err)
+		fmt.Fprintln(os.Stderr, err)
 		return
 	}
 	if verbose {
