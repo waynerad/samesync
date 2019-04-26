@@ -65,7 +65,7 @@ $ mv samed ~/bin
 
 $ samed -q
 
-This will create a file called samed.conf that you take to the clients. When you are ready to run the server, just use
+This will create a file called samesetup.txt that you take to the clients. When you are ready to run the server, just use
 
 $ samed
 
