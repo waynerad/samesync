@@ -21,13 +21,15 @@ samesync synchronizes files between machines and makes them the same.
 
 Preliminaries: If you need to install Go, follow the instructions at https://golang.org/ .
 
-If you get an error message about missing header.h during this setup process, fix it with:
+If you get an error message about missing header.h during this setup process (happens on some Linux systems), fix it with:
 
 $ sudo apt-get install g++
 
-If you get an error saying git is missing, install with:
+If you get an error saying git is missing, install with (Linux):
 
 $ sudo apt install git
+
+If you're not using Linux, install git using the instructions for your OS. Go is designed to use git in conjuction with the "go get" command.
 
 You will need sqlite3. This is the one external dependency beyond the standard Go libraries and the packages that come with this GitHub repository.
 
@@ -107,7 +109,7 @@ and enter the admin password. Once in admin mode, the following commands will be
 * del grant -- takes access to a syncpoint away from a user.
 * reset password -- resets the password for a user on the server.
 
-The admin mode also has a command "local show config" that shows the client's local configuration, if you need to consult it will executing admin mode commands on the server.
+The admin mode also has a command "local show config" that shows the client's local configuration, if you need to consult it while executing admin mode commands on the server.
 
 
 # Issues

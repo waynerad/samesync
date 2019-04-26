@@ -2466,7 +2466,7 @@ func doQuickSetup(verbose bool, currentPath string, defaultStateFileName string,
 	}
 	var configFile string
 	if useFile == "" {
-		configFile = "../same.conf"
+		configFile = "../samesetup.txt"
 	} else {
 		configFile = useFile
 	}
@@ -2498,10 +2498,10 @@ func doQuickSetup(verbose bool, currentPath string, defaultStateFileName string,
 		checkError(err)
 		err = samecommon.SetupWriteSettingToConfigFile(fhConfigOut, "endtoendinitializationvector", endToEndIvStr)
 		checkError(err)
-		fmt.Println("Since the end-to-end encryption key was missing from the same.conf configuration")
-		fmt.Println("file, an end-to-end key was generated and added to the file. Use the same.conf")
-		fmt.Println("file from this machine to set up all other clients, so the end-to-end encryption")
-		fmt.Println("key is the same on all the clients.")
+		fmt.Println("Since the end-to-end encryption key was missing from the samesetup.txt")
+		fmt.Println("configuration file, an end-to-end key was generated and added to the file. Use")
+		fmt.Println("the samesetup.txt file from this machine to set up all other clients, so the")
+		fmt.Println("end-to-end encryption key is the same on all the clients.")
 		fhConfigOut.Close()
 	}
 	configInfo, err = quickSetupReadConfigFile(configFile)
@@ -2643,7 +2643,7 @@ func main() {
 	runForever := *zflag
 	quickSetup := *qflag
 	if verbose {
-		fmt.Println("same version 0.5.5")
+		fmt.Println("same version 0.5.6")
 		fmt.Println("Command line flags:")
 		fmt.Println("    Initialize mode:", onOff(initialize))
 		fmt.Println("    Configure mode:", onOff(configure))

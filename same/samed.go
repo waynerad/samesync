@@ -2559,7 +2559,7 @@ func main() {
 	createAdmin := *aflag
 	quickSetup := *qflag
 	if verbose {
-		fmt.Println("samed version 0.5.5")
+		fmt.Println("samed version 0.5.6")
 		fmt.Println("Flags:")
 		fmt.Println("    Generate key mode:", onOff(generateKeys))
 		fmt.Println("    Initialize:", onOff(initialize))
@@ -2658,7 +2658,7 @@ func main() {
 		//
 		// 7. Write out port, server key, and "everybody" password to config file.
 		//
-		fhConfig, err := os.Create("same.conf")
+		fhConfig, err := os.Create("samesetup.txt")
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return
@@ -2703,18 +2703,18 @@ func main() {
 		// 8. Closing instructions to user
 		//
 		fmt.Println("")
-		fmt.Println("You should now have a file called same.conf. Take this file to your client")
+		fmt.Println("You should now have a file called samesetup.txt. Take this file to your client")
 		fmt.Println("machines, put it one directory UP from the directory you want to sync (so it is")
-		fmt.Println("../same.conf when you run the program) and run " + `"` + "same -q" + `"` + ". If you put the file")
-		fmt.Println("somewhere other than ../same.conf you will need to specify the file path with")
+		fmt.Println("../samesetup.txt when you run the program) and run " + `"` + "same -q" + `"` + ". If you put the")
+		fmt.Println("file somewhere other than ../samesetup.txt you will need to specify the file path with")
 		fmt.Println(`"` + "same -q -f <file>" + `"` + ".")
 		fmt.Println("")
-		fmt.Println("The first client where you run same -q will add the end-to-end key to the file.")
+		fmt.Println(" The first client where you run same -q will add the end-to-end key to the file.")
 		fmt.Println("This is done at the client so you know the server never has access to the key.")
 		fmt.Println("Once the end-to-end key has been added, you can take that version of the file")
 		fmt.Println("to all other clients.")
 		fmt.Println("")
-		fmt.Println("After all clients are set up, the same.conf files should be deleted.")
+		fmt.Println("After all clients are set up, the samesetup.txt files should be deleted.")
 		fmt.Println("")
 		return
 	}
