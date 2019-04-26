@@ -59,7 +59,7 @@ $ mv same ~/bin
 
 $ mv samed ~/bin
 
-5. You'll need to do this on every machine (client and server). You can skip building the server executable (samed) on servers and you can skip building the client executable (same) on clients.
+5. You'll need to do this on every machine (client and server). You can skip building the server executable (samed) on clients and you can skip building the client executable (same) on servers.
 
 6. To set up the server: Create a subdirectory for the server to run in, and create a subdirectory under that for actually storing the files. The server will create a directory in a file called sameserver.db and you will need a subdirectory for each synchronized directory you synchronize between clients. This "Quick Setup" process will set up the first one. You'll also need to decide what port number to run the server on. Once you are ready, just type:
 
@@ -99,7 +99,7 @@ $ same -a
 and enter the admin password. Once in admin mode, the following commands will become available:
 
 * show users -- shows what user accounts the server recognizes. Quick Setup creates a user called "everybody", but you can create user accounts that identify individuals.
-* show syncpoints -- shows which directories are being synchronized. These are called syncpoints (the directory on the server act as a synrchonization point for multiple clients synchronizing that directory). The server can handle multiple syncpoints.
+* show syncpoints -- shows which directories are being synchronized. These are called syncpoints (the directory on the server acts as a synrchonization point for multiple clients synchronizing that directory). The server can handle multiple syncpoints.
 * show grants -- shows what users have access to what syncpoints. Users can be given read-only access instead of read-write. The Quick Setup process gives user "everybody" read-write access.
 * add user -- adds a user account to the server.
 * add syncpoint -- adds a syncpoint to the server. The syncpoint has a long hexadecimal ID that you will use to identify it in other commands.
