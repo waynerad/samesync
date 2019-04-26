@@ -41,8 +41,6 @@ Ok, now let's get on with the setup process:
 
 2. Build wrpc. This is the package that handles the actual encrypted RPC calls. Create a directory called "wrpc" in your go/src directory. Copy the contents of the "wrpc" directory from this project in there (wrpc.go and wrpc_test.go). In go/src/wrpc:
 
-$ go test
-
 $ go install
 
 3. Build samecommon. This is the package that has common functions between the client and server. Create a directory called "samecommon" in your go/src directory. Copy samecommon.go into this directory. In go/src/samecommon:
@@ -61,7 +59,7 @@ $ mv samed ~/bin
 
 5. You'll need to do this on every machine (client and server). You can skip building the server executable (samed) on clients and you can skip building the client executable (same) on servers.
 
-6. To set up the server: Create a subdirectory for the server to run in, and create a subdirectory under that for actually storing the files. The server will create a directory in a file called sameserver.db and you will need a subdirectory for each synchronized directory you synchronize between clients. This "Quick Setup" process will set up the first one. You'll also need to decide what port number to run the server on. Once you are ready, just type:
+6. To set up the server: Create a subdirectory for the server to run in, and create a subdirectory under that for actually storing the files. The server will create a file called sameserver.db that it will use to keep track of what it is doing. You will need a subdirectory for each synchronized directory you synchronize between clients. The "Quick Setup" process described here will use one directory that you created, so if you're just going to do the "Quick Setup", you only need to create one directory. You'll also need to decide what port number to run the server on. Once you are ready, just type:
 
 $ samed -q
 
@@ -71,11 +69,11 @@ $ samed
 
 This can be combined with nohup to make a server that stays up all the time.
 
-On the client, place the samesetup.txt file one directory UP from the directory you want synchronized.
+7. On the client, place the samesetup.txt file one directory UP from the directory you want synchronized.
 
 $ same -q
 
-On the first client, end-to-end encryption keys will be generated and added to the file. Copy this new samesetup.txt file to all the other clients so they all use the same end-to-end encryption key. Be careful copying this file across the network: make sure you use scp or WinSCP or some other secure copy system, as this file contains encryption keys -- the best thing is to use sneakernet and move the file from machine to machine manually such as on a USB stick.
+8. On the first client, end-to-end encryption keys will be generated and added to the file. Copy this new samesetup.txt file to all the other clients so they all use the same end-to-end encryption key. Be careful copying this file across the network: make sure you use scp or WinSCP or some other secure copy system, as this file contains encryption keys -- the best thing is to use sneakernet and move the file from machine to machine manually such as on a USB stick.
 
 Once the clients are set up, you synchronize them just by typing "same".
 
