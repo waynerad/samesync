@@ -71,17 +71,17 @@ $ samed
 
 This can be combined with nohup to make a server that stays up all the time.
 
-On the client, place the same.conf file one directory UP from the directory you want synchronized.
+On the client, place the samesetup.txt file one directory UP from the directory you want synchronized.
 
 $ same -q
 
-On the first client, end-to-end encryption keys will be generated and added to the file. Copy this new same.conf file to all the other clients so they all use the same end-to-end encryption key. Be careful copying this file across the network: make sure you use scp or WinSCP or some other secure copy system, as this file contains encryption keys -- the best thing is to use sneakernet and move the file from machine to machine manually such as on a USB stick.
+On the first client, end-to-end encryption keys will be generated and added to the file. Copy this new samesetup.txt file to all the other clients so they all use the same end-to-end encryption key. Be careful copying this file across the network: make sure you use scp or WinSCP or some other secure copy system, as this file contains encryption keys -- the best thing is to use sneakernet and move the file from machine to machine manually such as on a USB stick.
 
 Once the clients are set up, you synchronize them just by typing "same".
 
 $ same
 
-At this point, the system should be set up and all you have to do is type "same". You should delete all same.conf files.
+At this point, the system should be set up and all you have to do is type "same". You should delete all samesetup.txt files.
 
 
 # Setup for complex scenarios
