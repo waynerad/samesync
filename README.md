@@ -1,5 +1,6 @@
 # samesync
-samesync synchronizes files between machines and makes them the same.
+
+samesync synchronizes files between machines and makes them the same. samesync is an "explicit" system -- unlike "implicit" systems like Dropbox, samesync only synchronizes files when you explicitly tell it to (on the command line), and it tells you explicity what files it is pushing off your machine or pulling on to it, so you know exactly what it is doing.
 
 * All communication encrypted with AES256.
 * SHA256 used for keyed hash message authentication codes.
@@ -10,7 +11,7 @@ samesync synchronizes files between machines and makes them the same.
 * Dates & times used to determine newest versions of files -- takes into account differences in machine time settings from drift or time zones.
 * Admin mode to set up system and diagnose and correct problems.
 * Written in Golang.
-* Works on all OSs where Go runs (Linux, Mac, Windows) -- handles OS-specific issues like backslashes vs slashes in directory paths correctly.
+* Works on all OSs where Go runs (Linux, Mac, Windows) -- handles OS-specific issues like backslashes vs slashes in directory paths correctly. However, on Windows, the sqlite3 package for Go will not compile without gcc (the default compiler for Unix-style systems which includes Linux and Mac, which uses BSD Unix under the hood), and getting gcc to work on Windows is hard.
 * Does not use HTTP for communication. Communicates directly using TCP sockets using Go's net package. Can run on any port you like. Can run on servers that don't have web servers (Apache, nginx, etc) installed.
 * Uses sqlite3 (via Go's SQL interface in the sql package) for all data (on both client and server sides). Does not require the installation of a database server (MySQL, postgres, etc).
 * Only dependency other than the Go standard library is sqlite3.
@@ -21,7 +22,7 @@ samesync synchronizes files between machines and makes them the same.
 
 Preliminaries: If you need to install Go, follow the instructions at https://golang.org/ .
 
-If you get an error message about missing header.h during this setup process (happens on some Linux systems), fix it with:
+If you get an error message  that looks like "fatal error: stdlib.h: No such file or directory" (happens on some Linux systems) during the setup process, fix it with:
 
 $ sudo apt-get install g++
 
@@ -34,6 +35,8 @@ If you're not using Linux, install git using the instructions for your OS. Go is
 You will need sqlite3. This is the one external dependency beyond the standard Go libraries and the packages that come with this GitHub repository.
 
 $ go get github.com/mattn/go-sqlite3
+
+If you are using Windows, you are in for a huge headache at this point because this sqlite3 package will not install on Windows without gcc, which is the default C compiler for Unix-style systems (which includes all Linuxes and Mac, because Mac uses BSD Unix under the hood). Getting gcc to work on Windows is hard. Maybe someday we'll have a proper Windows installer that will install pre-compiled binaries on your system like most Windows programs, but we're not at that stage yet.
 
 Ok, now let's get on with the setup process:
 
