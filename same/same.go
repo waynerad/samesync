@@ -1538,7 +1538,7 @@ func putTreeInTableAndFillInHashesThatNeedToBeUpdated(verbose bool, db *sql.DB, 
 				_, err := stmtIns.Exec(samecommon.MakePathSeparatorsStandard(tree[ii].FilePath[chopOff:]), tree[ii].FileSize, tree[ii].FileTime, fileHash)
 				checkError(err)
 			} else {
-				if (filesize == tree[ii].FileSize) && (filetime == tree[ii].FileTime) && (oldFileHash != "deleted") {
+				if (filesize == tree[ii].FileSize) && (filetime == tree[ii].FileTime) && (oldFileHash != "deleted") && (oldFileHash != "") {
 					// assume hasn't changed -- leave alone!
 					if verbose {
 						fmt.Println(" - Has not changed")
@@ -2643,7 +2643,7 @@ func main() {
 	runForever := *zflag
 	quickSetup := *qflag
 	if verbose {
-		fmt.Println("same version 0.5.6")
+		fmt.Println("same version 0.5.7")
 		fmt.Println("Command line flags:")
 		fmt.Println("    Initialize mode:", onOff(initialize))
 		fmt.Println("    Configure mode:", onOff(configure))
@@ -2718,7 +2718,7 @@ func main() {
 	if showServerKeys {
 		symmetricKeyStr := getValue(db, "serversymkey", "")
 		hmacKeyStr := getValue(db, "serverhmackey", "")
-		fmt.Println(symmetricKeyStr)
+		fmt.Print(symmetricKeyStr)
 		fmt.Println(hmacKeyStr)
 		return
 	}
