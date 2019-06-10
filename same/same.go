@@ -173,6 +173,18 @@ func decryptDirectoryPath(filepath string, endToEndIV []byte, endToEndSymmetricK
 	return result, nil
 }
 
+func printPercent(bytesread int64, filesize int64, previous string, prec int) (string, int) {
+	// Had to modify this to expand the precision when the same percentage
+	// is repeated so user can get meaningful feedback on very large files.
+	pct := strconv.FormatFloat((float64(bytesread)/float64(filesize))*100, 'f', prec, 64) + "%"
+	if pct == previous {
+		prec++
+		pct = strconv.FormatFloat((float64(bytesread)/float64(filesize))*100, 'f', prec, 64) + "%"
+	}
+	fmt.Println(pct)
+	return pct, prec
+}
+
 // ----------------------------------------------------------------
 // Remote calls
 // ----------------------------------------------------------------
@@ -695,9 +707,20 @@ func sendFile(verbose bool, wnet wrpc.IWNetConnection, syncpublicid string, loca
 		return err
 	}
 	keepGoing := true
+	thresholdTime := getLocalTime() + 1000000000
+	var bytesread int64
+	bytesread = 0
+	previous := ""
+	prec := 0
 	for keepGoing {
+		currentTime := getLocalTime()
+		if currentTime > thresholdTime {
+			previous, prec = printPercent(bytesread, filesize, previous, prec)
+			thresholdTime = currentTime + 1000000000
+		}
 		n, err := fh.Read(buffer)
 		if err == nil {
+			bytesread += int64(n)
 			if endToEndEncryption {
 				if endToEndIvSent {
 					endToEndCipherstreamOut.XORKeyStream(endToEndBuffer[:n], buffer[:n])
@@ -924,7 +947,15 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 	var endToEndHasher hash.Hash
 	var endToEndActualHmac []byte
 	var endToEndFileSizeMinusHMACSignature int64
+	thresholdTime := getLocalTime() + 1000000000
+	previous := ""
+	prec := 0
 	for bytesread < filesize {
+		currentTime := getLocalTime()
+		if currentTime > thresholdTime {
+			previous, prec = printPercent(bytesread, filesize, previous, prec)
+			thresholdTime = currentTime + 1000000000
+		}
 		lrest := filesize - bytesread
 		if lrest > bufferSize {
 			nIn, err = wnet.PullBytes(buffer, ciphertext)
@@ -2643,7 +2674,7 @@ func main() {
 	runForever := *zflag
 	quickSetup := *qflag
 	if verbose {
-		fmt.Println("same version 0.5.7")
+		fmt.Println("same version 0.5.8")
 		fmt.Println("Command line flags:")
 		fmt.Println("    Initialize mode:", onOff(initialize))
 		fmt.Println("    Configure mode:", onOff(configure))
