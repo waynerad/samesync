@@ -26,7 +26,8 @@ import (
 )
 
 type fileSortSlice struct {
-	theSlice []samecommon.SameFileInfo
+	theSlice   []samecommon.SameFileInfo
+	sortByHash bool
 }
 
 const databaseFileName = ".samestate"
@@ -183,6 +184,22 @@ func printPercent(bytesread int64, filesize int64, previous string, prec int) (s
 	}
 	fmt.Println(pct)
 	return pct, prec
+}
+
+func calcHash(filePath string) (string, error) {
+	fileHandle, err := os.Open(samecommon.MakePathSeparatorsForThisOS(filePath))
+	if err != nil {
+		return "", err
+	}
+	defer fileHandle.Close()
+	hash := sha256.New()
+	_, err = io.Copy(hash, fileHandle)
+	checkError(err)
+	if err != nil {
+		return "", err
+	}
+	encoded := hex.EncodeToString(hash.Sum(nil))
+	return encoded, nil
 }
 
 // ----------------------------------------------------------------
@@ -1069,7 +1086,10 @@ func retrieveFile(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpubli
 	// expected file hash. If it does not, we assume we are being hacked and
 	// throw it away
 	//
-	newFileHash := calcHash(localdir + string(os.PathSeparator) + tempFileName)
+	newFileHash, err := calcHash(localdir + string(os.PathSeparator) + tempFileName)
+	if err != nil {
+		return err
+	}
 	if newFileHash != receiveFileHash {
 		return errors.New("retrieveFile: Hash verification failed for: " + localdir + string(os.PathSeparator) + tempFileName)
 	}
@@ -1426,10 +1446,10 @@ func calcTimeFromNow(someTime int64) string {
 	return int64ToStr((currentTime - someTime) / 1000000000)
 }
 
-// when we get a tree, we initially set the hash to empty string
-// we don't go ahead and compute the hashes because we only compute hashes if the file size or date has changed
-// as an optimization
-func getDirectoryTree(verbose bool, path string, result []samecommon.SameFileInfo, skipIfPermissionDenied bool) ([]samecommon.SameFileInfo, error) {
+// When we get a tree, we initially set the hash to empty string. We don't go
+// ahead and compute the hashes because we only compute hashes if the file size
+// or date has changed as an optimization.
+func getDirectoryTree(verbose bool, reportEmptyDirectories bool, path string, result []samecommon.SameFileInfo, skipIfPermissionDenied bool) ([]samecommon.SameFileInfo, error) {
 	if verbose {
 		fmt.Println("Scanning: " + path)
 	}
@@ -1452,11 +1472,13 @@ func getDirectoryTree(verbose bool, path string, result []samecommon.SameFileInf
 		}
 		return result, err
 	}
+	count := 0
 	for _, filestuff := range filesInDir {
+		count++
 		if filestuff.Name() != "spool" {
 			completePath := path + string(os.PathSeparator) + filestuff.Name()
 			if filestuff.IsDir() {
-				result, err = getDirectoryTree(verbose, completePath, result, skipIfPermissionDenied)
+				result, err = getDirectoryTree(verbose, reportEmptyDirectories, completePath, result, skipIfPermissionDenied)
 				checkError(err)
 			} else {
 				if verbose {
@@ -1466,44 +1488,41 @@ func getDirectoryTree(verbose bool, path string, result []samecommon.SameFileInf
 			}
 		}
 	}
+	if count == 0 {
+		if reportEmptyDirectories {
+			fmt.Println("Empty directory: " + path)
+		}
+	}
 	return result, nil
 }
 
-func (ptr *fileSortSlice) Len() int {
-	return len(ptr.theSlice)
+func (self *fileSortSlice) Len() int {
+	return len(self.theSlice)
 }
 
-func (ptr *fileSortSlice) Less(i, j int) bool {
-	return ptr.theSlice[i].FilePath < ptr.theSlice[j].FilePath
+func (self *fileSortSlice) Less(i, j int) bool {
+	if self.sortByHash {
+		return self.theSlice[i].FileHash < self.theSlice[j].FileHash
+	}
+	return self.theSlice[i].FilePath < self.theSlice[j].FilePath
 }
 
-func (ptr *fileSortSlice) Swap(i, j int) {
-	filePath := ptr.theSlice[i].FilePath
-	ptr.theSlice[i].FilePath = ptr.theSlice[j].FilePath
-	ptr.theSlice[j].FilePath = filePath
-	fileSize := ptr.theSlice[i].FileSize
-	ptr.theSlice[i].FileSize = ptr.theSlice[j].FileSize
-	ptr.theSlice[j].FileSize = fileSize
-	fileTime := ptr.theSlice[i].FileTime
-	ptr.theSlice[i].FileTime = ptr.theSlice[j].FileTime
-	ptr.theSlice[j].FileTime = fileTime
-	fileHash := ptr.theSlice[i].FileHash
-	ptr.theSlice[i].FileHash = ptr.theSlice[j].FileHash
-	ptr.theSlice[j].FileHash = fileHash
-	reUpNeeded := ptr.theSlice[i].ReUpNeeded
-	ptr.theSlice[i].ReUpNeeded = ptr.theSlice[j].ReUpNeeded
-	ptr.theSlice[j].ReUpNeeded = reUpNeeded
-}
-
-func calcHash(filePath string) string {
-	fileHandle, err := os.Open(samecommon.MakePathSeparatorsForThisOS(filePath))
-	checkError(err)
-	defer fileHandle.Close()
-	hash := sha256.New()
-	_, err = io.Copy(hash, fileHandle)
-	checkError(err)
-	encoded := hex.EncodeToString(hash.Sum(nil))
-	return encoded
+func (self *fileSortSlice) Swap(i, j int) {
+	filePath := self.theSlice[i].FilePath
+	self.theSlice[i].FilePath = self.theSlice[j].FilePath
+	self.theSlice[j].FilePath = filePath
+	fileSize := self.theSlice[i].FileSize
+	self.theSlice[i].FileSize = self.theSlice[j].FileSize
+	self.theSlice[j].FileSize = fileSize
+	fileTime := self.theSlice[i].FileTime
+	self.theSlice[i].FileTime = self.theSlice[j].FileTime
+	self.theSlice[j].FileTime = fileTime
+	fileHash := self.theSlice[i].FileHash
+	self.theSlice[i].FileHash = self.theSlice[j].FileHash
+	self.theSlice[j].FileHash = fileHash
+	reUpNeeded := self.theSlice[i].ReUpNeeded
+	self.theSlice[i].ReUpNeeded = self.theSlice[j].ReUpNeeded
+	self.theSlice[j].ReUpNeeded = reUpNeeded
 }
 
 func putTreeInTableAndFillInHashesThatNeedToBeUpdated(verbose bool, db *sql.DB, tree []samecommon.SameFileInfo, basePath string) {
@@ -1561,13 +1580,17 @@ func putTreeInTableAndFillInHashesThatNeedToBeUpdated(verbose bool, db *sql.DB, 
 				rowsCheck.Scan(&fileid, &filesize, &filetime, &oldFileHash)
 			}
 			if fileid == 0 {
-				fileHash := calcHash(tree[ii].FilePath)
-				if verbose {
-					fmt.Println(" - NEW, original hash is:", fileHash)
+				fileHash, err := calcHash(tree[ii].FilePath)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "Can not read file: "+tree[ii].FilePath+": "+err.Error())
+				} else {
+					if verbose {
+						fmt.Println(" - NEW, original hash is:", fileHash)
+					}
+					tree[ii].FileHash = fileHash
+					_, err := stmtIns.Exec(samecommon.MakePathSeparatorsStandard(tree[ii].FilePath[chopOff:]), tree[ii].FileSize, tree[ii].FileTime, fileHash)
+					checkError(err)
 				}
-				tree[ii].FileHash = fileHash
-				_, err := stmtIns.Exec(samecommon.MakePathSeparatorsStandard(tree[ii].FilePath[chopOff:]), tree[ii].FileSize, tree[ii].FileTime, fileHash)
-				checkError(err)
 			} else {
 				if (filesize == tree[ii].FileSize) && (filetime == tree[ii].FileTime) && (oldFileHash != "deleted") && (oldFileHash != "") {
 					// assume hasn't changed -- leave alone!
@@ -1576,13 +1599,17 @@ func putTreeInTableAndFillInHashesThatNeedToBeUpdated(verbose bool, db *sql.DB, 
 					}
 					tree[ii].FileHash = oldFileHash
 				} else {
-					fileHash := calcHash(tree[ii].FilePath)
-					if verbose {
-						fmt.Println(" - CHANGED, new hash:", fileHash)
+					fileHash, err := calcHash(tree[ii].FilePath)
+					if err != nil {
+						fmt.Fprintln(os.Stderr, "Can not read file: "+tree[ii].FilePath+": "+err.Error())
+					} else {
+						if verbose {
+							fmt.Println(" - CHANGED, new hash:", fileHash)
+						}
+						tree[ii].FileHash = fileHash
+						_, err := stmtUpd.Exec(tree[ii].FileSize, tree[ii].FileTime, fileHash, fileid)
+						checkError(err)
 					}
-					tree[ii].FileHash = fileHash
-					_, err := stmtUpd.Exec(tree[ii].FileSize, tree[ii].FileTime, fileHash, fileid)
-					checkError(err)
 				}
 				delete(deleteMap, fileid)
 			}
@@ -1897,9 +1924,107 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 	}
 }
 
+func detectDuplicates(verbose bool, tree []samecommon.SameFileInfo) {
+	ltr := len(tree)
+	prevHash := "none"
+	for ii := 0; ii < ltr; ii++ {
+		if len(tree[ii].FileHash) == 64 { // simple way to filter out hashes that are non-hashes like "deleted"
+			if tree[ii].FileHash == prevHash {
+				fmt.Println("Duplicate: " + tree[ii].FilePath + " == " + tree[ii-1].FilePath)
+			}
+			prevHash = tree[ii].FileHash
+		}
+	}
+}
+
+// func doRenames(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpublicid string, localPath string, localTree []samecommon.SameFileInfo, remotePath string, remoteTree []samecommon.SameFileInfo, serverTimeOffset int64, runForever bool, endToEndEncryption bool, endToEndIV []byte, endToEndSymmetricKey []byte, endToEndHmacKey []byte) {
+func doRenames(verbose bool, localTree []samecommon.SameFileInfo, remoteTree []samecommon.SameFileInfo) {
+	filterDatabaseFile := "/" + databaseFileName
+	filterTempFile := "/" + tempFileName
+	localIdx := 0
+	remoteIdx := 0
+	for (localIdx < len(localTree)) || (remoteIdx < len(remoteTree)) {
+		if localIdx == len(localTree) {
+			if verbose {
+				fmt.Println("off end of local tree")
+			}
+			remoteIdx++
+		} else {
+			localCompare := localTree[localIdx].FileHash
+			if remoteIdx == len(remoteTree) {
+				if verbose {
+					fmt.Println("off end of remote tree")
+				}
+				localIdx++
+			} else {
+				remoteCompare := remoteTree[remoteIdx].FileHash
+				if localCompare == remoteCompare {
+					if verbose {
+						fmt.Println("file hashes are the name, check file paths")
+					}
+					if len(localCompare) == 64 { // quick check to filter out non-hash status codes like "deleted"
+						if localTree[localIdx].FilePath != remoteTree[remoteIdx].FilePath {
+							onlyOneLocal := true
+							if localIdx > 0 {
+								if localTree[localIdx-1].FileHash == localCompare {
+									onlyOneLocal = false
+								}
+							}
+							if localIdx < (len(localTree) - 1) {
+								if localTree[localIdx+1].FileHash == localCompare {
+									onlyOneLocal = false
+								}
+							}
+							onlyOneRemote := true
+							if remoteIdx > 0 {
+								if remoteTree[remoteIdx-1].FileHash == remoteCompare {
+									onlyOneRemote = false
+								}
+							}
+							if remoteIdx < (len(remoteTree) - 1) {
+								if remoteTree[remoteIdx+1].FileHash == remoteCompare {
+									onlyOneRemote = false
+								}
+							}
+							if onlyOneLocal && onlyOneRemote {
+								// fmt.Println("Would rename: ", localTree[localIdx].FilePath, "=>", remoteTree[remoteIdx].FilePath)
+								// We shouldn't really NEED to filter out our files here
+								// -- if there's more than one copy something is wrong
+								// -- but we do it anyway just to make sure if things
+								// are messed up we don't make them worse.
+								if (localTree[localIdx].FilePath != filterDatabaseFile) && (localTree[localIdx].FilePath != filterTempFile) && (remoteTree[remoteIdx].FilePath != filterDatabaseFile) && (remoteTree[remoteIdx].FilePath != filterTempFile) {
+									fmt.Println("Would rename: ", localTree[localIdx].FilePath, "=>", remoteTree[remoteIdx].FilePath)
+								}
+							}
+						}
+					}
+					localIdx++
+					remoteIdx++
+				} else {
+					if verbose {
+						fmt.Println("file hashes are NOT the same, see which comes first")
+					}
+					if localCompare < remoteCompare {
+						if verbose {
+							fmt.Println("local is first")
+						}
+						localIdx++
+					} else {
+						if verbose {
+							fmt.Println("remote is first")
+						}
+						remoteIdx++
+					}
+				}
+			}
+		}
+	}
+}
+
 func dumpTree(tree []samecommon.SameFileInfo) {
 	for _, fileinfo := range tree {
-		fmt.Println(fileinfo.FilePath)
+		// fmt.Println(fileinfo.FilePath + " " + fileinfo.FileHash)
+		fmt.Println(fileinfo.FileHash + " " + fileinfo.FilePath)
 	}
 }
 
@@ -1933,10 +2058,10 @@ func getLine(reader *bufio.Reader) string {
 	return trim(result)
 }
 
-func recalculateAllFileHashes(verbose bool, db *sql.DB, rootPath string) {
+func recalculateAllFileHashes(verbose bool, reportEmptyDirectories bool, db *sql.DB, rootPath string) {
 	var sortSlice fileSortSlice
 	localTree := make([]samecommon.SameFileInfo, 0)
-	localTree, err := getDirectoryTree(verbose, rootPath, localTree, false)
+	localTree, err := getDirectoryTree(verbose, reportEmptyDirectories, rootPath, localTree, false)
 	checkError(err)
 	sortSlice.theSlice = localTree
 	sort.Sort(&sortSlice)
@@ -1976,7 +2101,7 @@ func recalculateAllFileHashes(verbose bool, db *sql.DB, rootPath string) {
 	putTreeInTableAndFillInHashesThatNeedToBeUpdated(verbose, db, localTree, basePath)
 }
 
-func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, rootPath string, verbose bool) {
+func doAdminMode(verbose bool, reportEmptyDirectories bool, wnet wrpc.IWNetConnection, db *sql.DB, rootPath string) {
 	keyboard := bufio.NewReader(os.Stdin)
 	fmt.Print("Admin password: ")
 	password := getLine(keyboard)
@@ -2260,7 +2385,7 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, rootPath string, verbose
 									if verbose {
 										fmt.Println("Recalculating all file hashes.")
 									}
-									recalculateAllFileHashes(verbose, db, rootPath)
+									recalculateAllFileHashes(verbose, reportEmptyDirectories, db, rootPath)
 									if verbose {
 										fmt.Println("All file hashes recalculated.")
 									}
@@ -2359,7 +2484,7 @@ func doAdminMode(wnet wrpc.IWNetConnection, db *sql.DB, rootPath string, verbose
 									if verbose {
 										fmt.Println("Recalculating all file hashes.")
 									}
-									recalculateAllFileHashes(verbose, db, rootPath)
+									recalculateAllFileHashes(verbose, reportEmptyDirectories, db, rootPath)
 									if verbose {
 										fmt.Println("All file hashes recalculated.")
 									}
@@ -2465,7 +2590,7 @@ func quickSetupReadConfigFile(configFile string) (map[string]string, error) {
 	return nameValuePairs, nil
 }
 
-func checkForNestingAndInitializeDB(verbose bool, rootPath string, currentPath string, useFile string) (*sql.DB, error) {
+func checkForNestingAndInitializeDB(verbose bool, reportEmptyDirectories bool, rootPath string, currentPath string, useFile string) (*sql.DB, error) {
 	var err error
 	var db *sql.DB
 	if verbose {
@@ -2476,7 +2601,7 @@ func checkForNestingAndInitializeDB(verbose bool, rootPath string, currentPath s
 		return db, errors.New("You cannot create a syncronized directory inside another synchronized directory.")
 	}
 	localTree := make([]samecommon.SameFileInfo, 0)
-	localTree, err = getDirectoryTree(verbose, currentPath, localTree, false)
+	localTree, err = getDirectoryTree(verbose, reportEmptyDirectories, currentPath, localTree, false)
 	for ii := 0; ii < len(localTree); ii++ {
 		if localTree[ii].FilePath[len(localTree[ii].FilePath)-len(databaseFileName):] == databaseFileName {
 			return db, errors.New("You cannot create a syncronized directory inside another synchronized directory.")
@@ -2488,7 +2613,7 @@ func checkForNestingAndInitializeDB(verbose bool, rootPath string, currentPath s
 	return db, nil
 }
 
-func doQuickSetup(verbose bool, currentPath string, defaultStateFileName string, useFile string) {
+func doQuickSetup(verbose bool, reportEmptyDirectories bool, currentPath string, defaultStateFileName string, useFile string) {
 	rootPath := findRootPath(currentPath, defaultStateFileName)
 	if rootPath != "" {
 		fmt.Println("Looks like we are already set up to sync this directory.")
@@ -2555,7 +2680,7 @@ func doQuickSetup(verbose bool, currentPath string, defaultStateFileName string,
 		}
 	}
 	var db *sql.DB
-	db, err = checkForNestingAndInitializeDB(verbose, rootPath, currentPath, useFile)
+	db, err = checkForNestingAndInitializeDB(verbose, reportEmptyDirectories, rootPath, currentPath, useFile)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return
@@ -2659,6 +2784,7 @@ func main() {
 	xflag := flag.Bool("x", false, "show end-to-end encryption key")
 	zflag := flag.Bool("z", false, "run forever")
 	qflag := flag.Bool("q", false, "quick setup")
+	dflag := flag.Bool("d", false, "report duplicates and empty directories")
 	flag.Parse()
 	verbose := *vflag
 	configure := *cflag
@@ -2673,26 +2799,32 @@ func main() {
 	showEndToEndKeys := *xflag
 	runForever := *zflag
 	quickSetup := *qflag
+	reportDuplicatesAndEmptyDirectories := *dflag
 	if verbose {
-		fmt.Println("same version 0.5.8")
+		fmt.Println("same version 0.5.10")
 		fmt.Println("Command line flags:")
+		fmt.Println("    Quick Setup Mode:", onOff(quickSetup))
 		fmt.Println("    Initialize mode:", onOff(initialize))
 		fmt.Println("    Configure mode:", onOff(configure))
 		fmt.Println("    Import server key mode:", onOff(importServerKeys))
-		fmt.Println("    Show server key:", onOff(showServerKeys))
+		fmt.Println("    Generate end-to-end encryption keys:", onOff(generateEndToEndKeys))
+		fmt.Println("    Import end-to-end encryption keys:", onOff(importEndToEndKeys))
 		fmt.Println("    Admin mode:", onOff(adminMode))
+		fmt.Println("    Show configuration:", onOff(showConfig))
+		fmt.Println("    Show server key:", onOff(showServerKeys))
+		fmt.Println("    Show end-to-end encryption keys:", onOff(showEndToEndKeys))
+		fmt.Println("    Report duplicates and empty directories", onOff(reportDuplicatesAndEmptyDirectories))
 		fmt.Println("    Use database file (manual override):", useFile)
-		fmt.Println("    Generate End-To-End encryption keys:", onOff(generateEndToEndKeys))
 		fmt.Println("    Run forever:", onOff(runForever))
 	}
 	if quickSetup {
-		doQuickSetup(verbose, currentPath, databaseFileName, useFile)
+		doQuickSetup(verbose, reportDuplicatesAndEmptyDirectories, currentPath, databaseFileName, useFile)
 		return
 	}
 	rootPath := ""
 	var db *sql.DB
 	if initialize {
-		db, err = checkForNestingAndInitializeDB(verbose, rootPath, currentPath, useFile)
+		db, err = checkForNestingAndInitializeDB(verbose, reportDuplicatesAndEmptyDirectories, rootPath, currentPath, useFile)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return
@@ -3015,7 +3147,7 @@ func main() {
 			if adminMode {
 				// We are allowed to use the admin mode even if we can't connect to the server.
 				// But we give it "nil" for wnet so it knows we're not connected.
-				doAdminMode(nil, db, rootPath, verbose)
+				doAdminMode(verbose, reportDuplicatesAndEmptyDirectories, nil, db, rootPath)
 			}
 			return
 		}
@@ -3023,7 +3155,7 @@ func main() {
 			fmt.Println("Connected to server.")
 		}
 		if adminMode {
-			doAdminMode(wnet, db, rootPath, verbose)
+			doAdminMode(verbose, reportDuplicatesAndEmptyDirectories, wnet, db, rootPath)
 			return
 		}
 		serverTimeOffset, err := getServerTimeOffset(wnet)
@@ -3045,16 +3177,16 @@ func main() {
 			fmt.Println("Scanning local disk")
 		}
 		// Ok, now that we're logged in, let's scan the local disk and ask the remote server to tell us what it has
-		var sortSlice fileSortSlice
+		var sortLocalSlice fileSortSlice
 		localTree := make([]samecommon.SameFileInfo, 0)
 		path := rootPath
 		if verbose {
 			fmt.Println("Scanning local tree.")
 		}
-		localTree, err = getDirectoryTree(verbose, path, localTree, false)
+		localTree, err = getDirectoryTree(verbose, reportDuplicatesAndEmptyDirectories, path, localTree, false)
 		checkError(err)
-		sortSlice.theSlice = localTree
-		sort.Sort(&sortSlice)
+		sortLocalSlice.theSlice = localTree
+		sort.Sort(&sortLocalSlice)
 		basePath := rootPath // redundant copy
 		if verbose {
 			fmt.Println("base path:", basePath)
@@ -3069,9 +3201,18 @@ func main() {
 		// deleted files. We have to track the deleted files because
 		// otherwise when a user deletes a file, it will just magically
 		// reappear every time
+
 		localTree = retrieveTreeFromDB(verbose, db)
-		sortSlice.theSlice = localTree
-		sort.Sort(&sortSlice)
+		if verbose {
+			fmt.Println("Sorting local by hash.")
+		}
+		sortLocalSlice.theSlice = localTree
+		sortLocalSlice.sortByHash = true
+		sort.Sort(&sortLocalSlice)
+		if reportDuplicatesAndEmptyDirectories {
+			detectDuplicates(verbose, localTree)
+		}
+
 		remoteTree, err := rpcGetServerTreeForSyncPoint(wnet, syncPointID)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -3090,15 +3231,35 @@ func main() {
 			for ii := 0; ii < lremote; ii++ {
 				remoteTree[ii].FilePath, err = decryptDirectoryPath(remoteTree[ii].FilePath, endToEndIV, endToEndSymKey, endToEndHmacKey)
 			}
-		}
-		sortSlice.theSlice = remoteTree
-		sort.Sort(&sortSlice)
-		if !endToEndEncryption {
+		} else {
 			fmt.Println("End-to-end encryption is not set up. Use same -e to import an end-to-end")
 			fmt.Println("encryption key. If you do not have an end-to-end encryption key, use same -g to")
 			fmt.Println("generate one.")
 			return
 		}
+		if verbose {
+			fmt.Println("Sorting remote by hash.")
+		}
+		var sortRemoteSlice fileSortSlice
+		sortRemoteSlice.theSlice = remoteTree
+		sortRemoteSlice.sortByHash = true
+		sort.Sort(&sortRemoteSlice)
+
+		// do renames
+		doRenames(verbose, localTree, remoteTree)
+
+		if verbose {
+			fmt.Println("Sorting local by file path.")
+		}
+		sortLocalSlice.sortByHash = false
+		sort.Sort(&sortLocalSlice)
+
+		if verbose {
+			fmt.Println("Sorting remote by file path.")
+		}
+		sortRemoteSlice.sortByHash = false
+		sort.Sort(&sortRemoteSlice)
+
 		synchronizeTrees(verbose, db, wnet, syncPointID, path, localTree, "", remoteTree, serverTimeOffset, runForever, endToEndEncryption, endToEndIV, endToEndSymKey, endToEndHmacKey)
 		keepRunning = false
 		if runForever {
