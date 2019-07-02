@@ -1847,7 +1847,7 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 					}
 					anythingChanged = true
 				}
-				fmt.Println("Pushing -->", localTree[toUploadLocal].FilePath[1:])
+				fmt.Println("Pushing --> " + localTree[toUploadLocal].FilePath[1:])
 				localfilepath := localPath + localTree[toUploadLocal].FilePath
 				filehash := localTree[toUploadLocal].FileHash
 				err := sendFile(verbose, wnet, syncpublicid, localPath, localfilepath, filehash, serverTimeOffset, endToEndEncryption, endToEndIV, endToEndSymmetricKey, endToEndHmacKey)
@@ -1872,7 +1872,7 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 					}
 					anythingChanged = true
 				}
-				fmt.Println("Pulling <--", remoteTree[toDownloadRemote].FilePath[1:])
+				fmt.Println("Pulling <-- " + remoteTree[toDownloadRemote].FilePath[1:])
 				localfilepath := localPath + remoteTree[toDownloadRemote].FilePath
 				filehash := remoteTree[toDownloadRemote].FileHash
 				err := retrieveFile(verbose, db, wnet, syncpublicid, localPath, localfilepath, filehash, serverTimeOffset, endToEndEncryption, endToEndIV, endToEndSymmetricKey, endToEndHmacKey)
@@ -1895,7 +1895,8 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 					}
 					anythingChanged = true
 				}
-				fmt.Println("Pushing delete notification:", remoteTree[toDeleteRemote].FilePath[1:])
+				// fmt.Println("Pushing delete notification:", remoteTree[toDeleteRemote].FilePath[1:])
+				fmt.Println("Pushing --> delete notification: " + remoteTree[toDeleteRemote].FilePath[1:])
 				remotefilepath := remoteTree[toDeleteRemote].FilePath
 				filehash := remoteTree[toDeleteRemote].FileHash
 				err := rpcMarkFileDeleted(verbose, wnet, syncpublicid, remotefilepath, filehash, serverTimeOffset, endToEndEncryption, endToEndIV, endToEndSymmetricKey, endToEndHmacKey)
@@ -1913,7 +1914,8 @@ func synchronizeTrees(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncp
 					}
 					anythingChanged = true
 				}
-				fmt.Println("Deleting:", localTree[toDeleteLocal].FilePath[1:])
+				// fmt.Println("Deleting:", localTree[toDeleteLocal].FilePath[1:])
+				fmt.Println("Pulling <-- delete notification: " + localTree[toDeleteLocal].FilePath[1:])
 				localfilepath := localPath + samecommon.MakePathSeparatorsForThisOS(localTree[toDeleteLocal].FilePath)
 				if verbose {
 					fmt.Println("Deleting local file path:", localfilepath)
@@ -1933,90 +1935,6 @@ func detectDuplicates(verbose bool, tree []samecommon.SameFileInfo) {
 				fmt.Println("Duplicate: " + tree[ii].FilePath + " == " + tree[ii-1].FilePath)
 			}
 			prevHash = tree[ii].FileHash
-		}
-	}
-}
-
-// func doRenames(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpublicid string, localPath string, localTree []samecommon.SameFileInfo, remotePath string, remoteTree []samecommon.SameFileInfo, serverTimeOffset int64, runForever bool, endToEndEncryption bool, endToEndIV []byte, endToEndSymmetricKey []byte, endToEndHmacKey []byte) {
-func doRenames(verbose bool, localTree []samecommon.SameFileInfo, remoteTree []samecommon.SameFileInfo) {
-	filterDatabaseFile := "/" + databaseFileName
-	filterTempFile := "/" + tempFileName
-	localIdx := 0
-	remoteIdx := 0
-	for (localIdx < len(localTree)) || (remoteIdx < len(remoteTree)) {
-		if localIdx == len(localTree) {
-			if verbose {
-				fmt.Println("off end of local tree")
-			}
-			remoteIdx++
-		} else {
-			localCompare := localTree[localIdx].FileHash
-			if remoteIdx == len(remoteTree) {
-				if verbose {
-					fmt.Println("off end of remote tree")
-				}
-				localIdx++
-			} else {
-				remoteCompare := remoteTree[remoteIdx].FileHash
-				if localCompare == remoteCompare {
-					if verbose {
-						fmt.Println("file hashes are the name, check file paths")
-					}
-					if len(localCompare) == 64 { // quick check to filter out non-hash status codes like "deleted"
-						if localTree[localIdx].FilePath != remoteTree[remoteIdx].FilePath {
-							onlyOneLocal := true
-							if localIdx > 0 {
-								if localTree[localIdx-1].FileHash == localCompare {
-									onlyOneLocal = false
-								}
-							}
-							if localIdx < (len(localTree) - 1) {
-								if localTree[localIdx+1].FileHash == localCompare {
-									onlyOneLocal = false
-								}
-							}
-							onlyOneRemote := true
-							if remoteIdx > 0 {
-								if remoteTree[remoteIdx-1].FileHash == remoteCompare {
-									onlyOneRemote = false
-								}
-							}
-							if remoteIdx < (len(remoteTree) - 1) {
-								if remoteTree[remoteIdx+1].FileHash == remoteCompare {
-									onlyOneRemote = false
-								}
-							}
-							if onlyOneLocal && onlyOneRemote {
-								// fmt.Println("Would rename: ", localTree[localIdx].FilePath, "=>", remoteTree[remoteIdx].FilePath)
-								// We shouldn't really NEED to filter out our files here
-								// -- if there's more than one copy something is wrong
-								// -- but we do it anyway just to make sure if things
-								// are messed up we don't make them worse.
-								if (localTree[localIdx].FilePath != filterDatabaseFile) && (localTree[localIdx].FilePath != filterTempFile) && (remoteTree[remoteIdx].FilePath != filterDatabaseFile) && (remoteTree[remoteIdx].FilePath != filterTempFile) {
-									fmt.Println("Would rename: ", localTree[localIdx].FilePath, "=>", remoteTree[remoteIdx].FilePath)
-								}
-							}
-						}
-					}
-					localIdx++
-					remoteIdx++
-				} else {
-					if verbose {
-						fmt.Println("file hashes are NOT the same, see which comes first")
-					}
-					if localCompare < remoteCompare {
-						if verbose {
-							fmt.Println("local is first")
-						}
-						localIdx++
-					} else {
-						if verbose {
-							fmt.Println("remote is first")
-						}
-						remoteIdx++
-					}
-				}
-			}
 		}
 	}
 }
@@ -2769,19 +2687,16 @@ func doQuickSetup(verbose bool, reportEmptyDirectories bool, currentPath string,
 }
 
 func main() {
+	startTime := time.Now()
 	currentPath, err := os.Getwd()
 	checkError(err)
 	vflag := flag.Bool("v", false, "verbose")
 	cflag := flag.Bool("c", false, "configure")
 	iflag := flag.Bool("i", false, "initialize")
 	fflag := flag.String("f", "", "use specified file")
-	jflag := flag.Bool("j", false, "show server key")
-	kflag := flag.Bool("k", false, "import server key")
 	sflag := flag.Bool("s", false, "show configuration")
 	aflag := flag.Bool("a", false, "admin mode")
 	gflag := flag.Bool("g", false, "generate end-to-end encryption key")
-	eflag := flag.Bool("e", false, "import end-to-end encryption key")
-	xflag := flag.Bool("x", false, "show end-to-end encryption key")
 	zflag := flag.Bool("z", false, "run forever")
 	qflag := flag.Bool("q", false, "quick setup")
 	dflag := flag.Bool("d", false, "report duplicates and empty directories")
@@ -2790,29 +2705,21 @@ func main() {
 	configure := *cflag
 	initialize := *iflag
 	useFile := *fflag
-	importServerKeys := *kflag
-	showServerKeys := *jflag
 	showConfig := *sflag
 	adminMode := *aflag
 	generateEndToEndKeys := *gflag
-	importEndToEndKeys := *eflag
-	showEndToEndKeys := *xflag
 	runForever := *zflag
 	quickSetup := *qflag
 	reportDuplicatesAndEmptyDirectories := *dflag
 	if verbose {
-		fmt.Println("same version 0.5.10")
+		fmt.Println("same version 0.5.11")
 		fmt.Println("Command line flags:")
 		fmt.Println("    Quick Setup Mode:", onOff(quickSetup))
 		fmt.Println("    Initialize mode:", onOff(initialize))
 		fmt.Println("    Configure mode:", onOff(configure))
-		fmt.Println("    Import server key mode:", onOff(importServerKeys))
 		fmt.Println("    Generate end-to-end encryption keys:", onOff(generateEndToEndKeys))
-		fmt.Println("    Import end-to-end encryption keys:", onOff(importEndToEndKeys))
 		fmt.Println("    Admin mode:", onOff(adminMode))
 		fmt.Println("    Show configuration:", onOff(showConfig))
-		fmt.Println("    Show server key:", onOff(showServerKeys))
-		fmt.Println("    Show end-to-end encryption keys:", onOff(showEndToEndKeys))
 		fmt.Println("    Report duplicates and empty directories", onOff(reportDuplicatesAndEmptyDirectories))
 		fmt.Println("    Use database file (manual override):", useFile)
 		fmt.Println("    Run forever:", onOff(runForever))
@@ -2839,52 +2746,6 @@ func main() {
 		}
 	}
 	defer db.Close()
-	if importServerKeys {
-		keyboard := bufio.NewReader(os.Stdin)
-		fmt.Print("Server key: ")
-		keyLine := getLine(keyboard)
-		if len(keyLine) != 128 {
-			fmt.Fprintln(os.Stderr, "Key is of wrong length.")
-			return
-		}
-		keysAllBytes, err := hex.DecodeString(keyLine)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "Key is not in hexadecimal format.")
-			fmt.Fprintln(os.Stderr, err)
-			return
-		}
-		if verbose {
-			fmt.Println("Key entered:", hex.EncodeToString(keysAllBytes))
-		}
-		symkey := make([]byte, 32)
-		hmackey := make([]byte, 32)
-		copy(symkey, keysAllBytes[:32])
-		copy(hmackey, keysAllBytes[32:])
-		samecommon.SetNameValuePair(db, "serversymkey", hex.EncodeToString(symkey))
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return
-		}
-		if verbose {
-			fmt.Println("serversymkey set to", hex.EncodeToString(symkey))
-		}
-		samecommon.SetNameValuePair(db, "serverhmackey", hex.EncodeToString(hmackey))
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return
-		}
-		if verbose {
-			fmt.Println("serverhmackey set to", hex.EncodeToString(hmackey))
-		}
-		return
-	}
-	if showServerKeys {
-		symmetricKeyStr := getValue(db, "serversymkey", "")
-		hmacKeyStr := getValue(db, "serverhmackey", "")
-		fmt.Print(symmetricKeyStr)
-		fmt.Println(hmacKeyStr)
-		return
-	}
 	if configure {
 		fmt.Println("Any entry you leave blank will not be updated.")
 		// server := ""
@@ -2953,6 +2814,90 @@ func main() {
 				fmt.Println("syncpointid", syncPointID)
 			}
 		}
+		fmt.Print("Server key: ")
+		keyLine := getLine(keyboard)
+		if keyLine != "" {
+			if len(keyLine) != 128 {
+				fmt.Fprintln(os.Stderr, "Key is of wrong length.")
+				return
+			}
+			keysAllBytes, err := hex.DecodeString(keyLine)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "Key is not in hexadecimal format.")
+				fmt.Fprintln(os.Stderr, err)
+				return
+			}
+			if verbose {
+				fmt.Println("Key entered:", hex.EncodeToString(keysAllBytes))
+			}
+			symkey := make([]byte, 32)
+			hmackey := make([]byte, 32)
+			copy(symkey, keysAllBytes[:32])
+			copy(hmackey, keysAllBytes[32:])
+			samecommon.SetNameValuePair(db, "serversymkey", hex.EncodeToString(symkey))
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				return
+			}
+			if verbose {
+				fmt.Println("serversymkey set to", hex.EncodeToString(symkey))
+			}
+			samecommon.SetNameValuePair(db, "serverhmackey", hex.EncodeToString(hmackey))
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				return
+			}
+			if verbose {
+				fmt.Println("serverhmackey set to", hex.EncodeToString(hmackey))
+			}
+		}
+		fmt.Print("End-to-end key: ")
+		keyLine = getLine(keyboard)
+		if keyLine != "" {
+			if len(keyLine) != 160 {
+				fmt.Fprintln(os.Stderr, "Key is of wrong length.")
+				return
+			}
+			keysAllBytes, err := hex.DecodeString(keyLine)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "Key is not in hexadecimal format.")
+				fmt.Fprintln(os.Stderr, err)
+				return
+			}
+			if verbose {
+				fmt.Println("Key entered:", hex.EncodeToString(keysAllBytes))
+			}
+			endToEndSymKey := make([]byte, 32)
+			endToEndHmacKey := make([]byte, 32)
+			endToEndIV := make([]byte, 16)
+			copy(endToEndSymKey, keysAllBytes[:32])
+			copy(endToEndHmacKey, keysAllBytes[32:64])
+			copy(endToEndIV, keysAllBytes[64:])
+			samecommon.SetNameValuePair(db, "endtoendsymkey", hex.EncodeToString(endToEndSymKey))
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				return
+			}
+			if verbose {
+				fmt.Println("endtoendsymkey set to", hex.EncodeToString(endToEndSymKey))
+			}
+			samecommon.SetNameValuePair(db, "endtoendhmackey", hex.EncodeToString(endToEndHmacKey))
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				return
+			}
+			if verbose {
+				fmt.Println("endtoendhmackey set to", hex.EncodeToString(endToEndHmacKey))
+			}
+			samecommon.SetNameValuePair(db, "endtoendinitializationvector", hex.EncodeToString(endToEndIV))
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				return
+			}
+			if verbose {
+				fmt.Println("endtoendinitializationvector set to", hex.EncodeToString(endToEndIV))
+			}
+		}
 		return
 	}
 	if showConfig {
@@ -2997,62 +2942,6 @@ func main() {
 		fmt.Print(endToEndSymKeyStr)
 		fmt.Print(endToEndHmacKeyStr)
 		fmt.Println(endToEndIvStr)
-		return
-	}
-	if importEndToEndKeys {
-		keyboard := bufio.NewReader(os.Stdin)
-		fmt.Print("End-to-end key: ")
-		keyLine := getLine(keyboard)
-		if len(keyLine) != 160 {
-			fmt.Fprintln(os.Stderr, "Key is of wrong length.")
-			return
-		}
-		keysAllBytes, err := hex.DecodeString(keyLine)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "Key is not in hexadecimal format.")
-			fmt.Fprintln(os.Stderr, err)
-			return
-		}
-		if verbose {
-			fmt.Println("Key entered:", hex.EncodeToString(keysAllBytes))
-		}
-		endToEndSymKey := make([]byte, 32)
-		endToEndHmacKey := make([]byte, 32)
-		endToEndIV := make([]byte, 16)
-		copy(endToEndSymKey, keysAllBytes[:32])
-		copy(endToEndHmacKey, keysAllBytes[32:64])
-		copy(endToEndIV, keysAllBytes[64:])
-		samecommon.SetNameValuePair(db, "endtoendsymkey", hex.EncodeToString(endToEndSymKey))
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return
-		}
-		if verbose {
-			fmt.Println("endtoendsymkey set to", hex.EncodeToString(endToEndSymKey))
-		}
-		samecommon.SetNameValuePair(db, "endtoendhmackey", hex.EncodeToString(endToEndHmacKey))
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return
-		}
-		if verbose {
-			fmt.Println("endtoendhmackey set to", hex.EncodeToString(endToEndHmacKey))
-		}
-		samecommon.SetNameValuePair(db, "endtoendinitializationvector", hex.EncodeToString(endToEndIV))
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return
-		}
-		if verbose {
-			fmt.Println("endtoendinitializationvector set to", hex.EncodeToString(endToEndIV))
-		}
-		return
-	}
-	if showEndToEndKeys {
-		endToEndSymKeyStr := getValue(db, "endtoendsymkey", "")
-		endToEndHmacKeyStr := getValue(db, "endtoendhmackey", "")
-		fmt.Println(endToEndSymKeyStr)
-		fmt.Println(endToEndHmacKeyStr)
 		return
 	}
 	//
@@ -3177,7 +3066,7 @@ func main() {
 			fmt.Println("Scanning local disk")
 		}
 		// Ok, now that we're logged in, let's scan the local disk and ask the remote server to tell us what it has
-		var sortLocalSlice fileSortSlice
+		// xyz var sortLocalSlice fileSortSlice
 		localTree := make([]samecommon.SameFileInfo, 0)
 		path := rootPath
 		if verbose {
@@ -3185,8 +3074,9 @@ func main() {
 		}
 		localTree, err = getDirectoryTree(verbose, reportDuplicatesAndEmptyDirectories, path, localTree, false)
 		checkError(err)
-		sortLocalSlice.theSlice = localTree
-		sort.Sort(&sortLocalSlice)
+		// xyz sortLocalSlice.theSlice = localTree
+		// xyz sortLocalSlice.sortByHash = false
+		// xyz sort.Sort(&sortLocalSlice)
 		basePath := rootPath // redundant copy
 		if verbose {
 			fmt.Println("base path:", basePath)
@@ -3202,14 +3092,15 @@ func main() {
 		// otherwise when a user deletes a file, it will just magically
 		// reappear every time
 
+		var sortLocalSlice fileSortSlice
 		localTree = retrieveTreeFromDB(verbose, db)
-		if verbose {
-			fmt.Println("Sorting local by hash.")
-		}
 		sortLocalSlice.theSlice = localTree
-		sortLocalSlice.sortByHash = true
-		sort.Sort(&sortLocalSlice)
 		if reportDuplicatesAndEmptyDirectories {
+			if verbose {
+				fmt.Println("Sorting local by hash.")
+			}
+			sortLocalSlice.sortByHash = true
+			sort.Sort(&sortLocalSlice)
 			detectDuplicates(verbose, localTree)
 		}
 
@@ -3237,16 +3128,6 @@ func main() {
 			fmt.Println("generate one.")
 			return
 		}
-		if verbose {
-			fmt.Println("Sorting remote by hash.")
-		}
-		var sortRemoteSlice fileSortSlice
-		sortRemoteSlice.theSlice = remoteTree
-		sortRemoteSlice.sortByHash = true
-		sort.Sort(&sortRemoteSlice)
-
-		// do renames
-		doRenames(verbose, localTree, remoteTree)
 
 		if verbose {
 			fmt.Println("Sorting local by file path.")
@@ -3257,6 +3138,8 @@ func main() {
 		if verbose {
 			fmt.Println("Sorting remote by file path.")
 		}
+		var sortRemoteSlice fileSortSlice
+		sortRemoteSlice.theSlice = remoteTree
 		sortRemoteSlice.sortByHash = false
 		sort.Sort(&sortRemoteSlice)
 
@@ -3268,4 +3151,6 @@ func main() {
 			keepRunning = true
 		}
 	}
+	stopTime := time.Now()
+	fmt.Println(stopTime.Sub(startTime))
 }

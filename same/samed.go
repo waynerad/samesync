@@ -2559,7 +2559,7 @@ func main() {
 	createAdmin := *aflag
 	quickSetup := *qflag
 	if verbose {
-		fmt.Println("samed version 0.5.10")
+		fmt.Println("samed version 0.5.11")
 		fmt.Println("Flags:")
 		fmt.Println("    Generate key mode:", onOff(generateKeys))
 		fmt.Println("    Initialize:", onOff(initialize))
