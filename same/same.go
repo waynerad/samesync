@@ -1207,8 +1207,13 @@ func rpcResetUserPassword(wnet wrpc.IWNetConnection, username string) (string, e
 	if err != nil {
 		return "", err
 	}
-	password, err := wrpc.StandardStringReply(wnet, "ResetUserPassword")
-	return password, err
+	passwordBin, err := wrpc.StandardByteArrayReply(wnet, "ResetUserPassword")
+	if err != nil {
+		return "", err
+	}
+	passwordStr := make([]byte, 86)
+	num := ascii85.Encode(passwordStr, passwordBin)
+	return string(passwordStr[:num]), nil
 }
 
 func rpcUploadAllHashes(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, syncpublicid string, serverTimeOffset int64, endToEndEncryption bool, endToEndIV []byte, endToEndSymmetricKey []byte, endToEndHmacKey []byte) error {
@@ -1526,6 +1531,7 @@ func (self *fileSortSlice) Swap(i, j int) {
 }
 
 func putTreeInTableAndFillInHashesThatNeedToBeUpdated(verbose bool, db *sql.DB, tree []samecommon.SameFileInfo, basePath string) {
+	// Does not store "revert" flag. Revert flag does not persist across executions of the program.
 	var deleteMap map[int64]bool
 	deleteMap = make(map[int64]bool)
 
@@ -2700,6 +2706,7 @@ func main() {
 	zflag := flag.Bool("z", false, "run forever")
 	qflag := flag.Bool("q", false, "quick setup")
 	dflag := flag.Bool("d", false, "report duplicates and empty directories")
+	rflag := flag.String("r", "", "revert file or directory")
 	flag.Parse()
 	verbose := *vflag
 	configure := *cflag
@@ -2711,8 +2718,9 @@ func main() {
 	runForever := *zflag
 	quickSetup := *qflag
 	reportDuplicatesAndEmptyDirectories := *dflag
+	revertPath := *rflag
 	if verbose {
-		fmt.Println("same version 0.5.11")
+		fmt.Println("same version 0.5.14")
 		fmt.Println("Command line flags:")
 		fmt.Println("    Quick Setup Mode:", onOff(quickSetup))
 		fmt.Println("    Initialize mode:", onOff(initialize))
@@ -3074,9 +3082,6 @@ func main() {
 		}
 		localTree, err = getDirectoryTree(verbose, reportDuplicatesAndEmptyDirectories, path, localTree, false)
 		checkError(err)
-		// xyz sortLocalSlice.theSlice = localTree
-		// xyz sortLocalSlice.sortByHash = false
-		// xyz sort.Sort(&sortLocalSlice)
 		basePath := rootPath // redundant copy
 		if verbose {
 			fmt.Println("base path:", basePath)
@@ -3142,6 +3147,23 @@ func main() {
 		sortRemoteSlice.theSlice = remoteTree
 		sortRemoteSlice.sortByHash = false
 		sort.Sort(&sortRemoteSlice)
+
+		if revertPath != "" {
+			if verbose {
+				fmt.Println("Marking files that need to be reverted.")
+			}
+			if revertPath[0] != '/' {
+				revertPath = currentPath[len(rootPath):] + "/" + revertPath
+			}
+			for ii := 0; ii < len(localTree); ii++ {
+				if len(localTree[ii].FilePath) >= len(revertPath) {
+					if localTree[ii].FilePath[:len(revertPath)] == revertPath {
+						localTree[ii].FileTime = 1        // far in the past, force other file to be "newer"
+						localTree[ii].FileHash = "REVERT" // force hashes to be different
+					}
+				}
+			}
+		}
 
 		synchronizeTrees(verbose, db, wnet, syncPointID, path, localTree, "", remoteTree, serverTimeOffset, runForever, endToEndEncryption, endToEndIV, endToEndSymKey, endToEndHmacKey)
 		keepRunning = false

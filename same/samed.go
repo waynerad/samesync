@@ -1642,7 +1642,9 @@ func markFileDeleted(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *
 
 // Returns: new generated password. (Remember, users are not allowed to choose their own passwords.)
 func resetUserPassword(verbose bool, db *sql.DB, wnet wrpc.IWNetConnection, auth *samecommon.AuthInfo, username string) ([]byte, error) {
-	fmt.Println("Resetting user password for:", username)
+	if verbose {
+		fmt.Println("Resetting user password for:", username)
+	}
 	cmd := "SELECT userid FROM user WHERE (username = ?);"
 	stmtSel, err := db.Prepare(cmd)
 	if err != nil {
@@ -2559,7 +2561,7 @@ func main() {
 	createAdmin := *aflag
 	quickSetup := *qflag
 	if verbose {
-		fmt.Println("samed version 0.5.11")
+		fmt.Println("samed version 0.5.14")
 		fmt.Println("Flags:")
 		fmt.Println("    Generate key mode:", onOff(generateKeys))
 		fmt.Println("    Initialize:", onOff(initialize))
