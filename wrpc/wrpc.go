@@ -426,7 +426,6 @@ func (self *WNetConnection) DevelopConnectionMessage(conn net.Conn) ([]byte, err
 	//
 	if !self.ivReceived {
 		self.ivIncoming = make([]byte, aes.BlockSize)
-
 		n, err := conn.Read(self.ivIncoming)
 		if err != nil {
 			if err == io.EOF {
@@ -437,10 +436,21 @@ func (self *WNetConnection) DevelopConnectionMessage(conn net.Conn) ([]byte, err
 			return nil, err
 		}
 		if n != 16 {
-			conn.Close()
-			return nil, errors.New("Could only read partial AES256 initialization vector. Connection closed.")
+			// digitalocean makes this happen, needs this fix
+			offset := n
+			for offset < 16 {
+				n, err = conn.Read(self.ivIncoming[offset:])
+				if err != nil {
+					conn.Close()
+					if err == io.EOF {
+						return nil, errors.New("Insufficient bytes for length bytes. Connection closed.")
+						return nil, errors.New("Could only read partial AES256 initialization vector. Connection closed.")
+					}
+					return nil, err
+				}
+				offset += n
+			}
 		}
-
 		block, err := aes.NewCipher(self.symmetricKey)
 		if err != nil {
 			conn.Close()
@@ -453,8 +463,8 @@ func (self *WNetConnection) DevelopConnectionMessage(conn net.Conn) ([]byte, err
 	//
 	// Step 2: read the EEEE check and length byte
 	//
-	cipherl1 := make([]byte, 5)
 
+	cipherl1 := make([]byte, 5)
 	n, err := conn.Read(cipherl1)
 	if err != nil {
 		if err == io.EOF {
@@ -468,8 +478,19 @@ func (self *WNetConnection) DevelopConnectionMessage(conn net.Conn) ([]byte, err
 		return nil, err
 	}
 	if n != 5 {
-		conn.Close()
-		return nil, errors.New("Insufficient data for ciphertext length bytes. Connection closed.")
+		// digitalocean makes this happen, needs this fix
+		offset := n
+		for offset < 5 {
+			n, err = conn.Read(cipherl1[offset:])
+			if err != nil {
+				conn.Close()
+				if err == io.EOF {
+					return nil, errors.New("Insufficient data for ciphertext length bytes. Connection closed.")
+				}
+				return nil, err
+			}
+			offset += n
+		}
 	}
 
 	llbyte := make([]byte, 5) // EEEE + length byte
@@ -507,8 +528,19 @@ func (self *WNetConnection) DevelopConnectionMessage(conn net.Conn) ([]byte, err
 		return nil, err
 	}
 	if n != lli {
-		conn.Close()
-		return nil, errors.New("Insufficient bytes for length bytes. Connection closed.")
+		// digitalocean makes this happen, needs this fix
+		offset := n
+		for offset < lli {
+			n, err = conn.Read(cipherl2[offset:])
+			if err != nil {
+				conn.Close()
+				if err == io.EOF {
+					return nil, errors.New("Insufficient bytes for length bytes. Connection closed.")
+				}
+				return nil, err
+			}
+			offset += n
+		}
 	}
 
 	lbytes := make([]byte, lli)
@@ -561,14 +593,25 @@ func (self *WNetConnection) DevelopConnectionMessage(conn net.Conn) ([]byte, err
 	if err != nil {
 		if err == io.EOF {
 			conn.Close()
-			return nil, errors.New("Signature could not be read. End of input reached. Connection closed.")
+			return nil, errors.New("Signature could not be read. End of input reached. Connection closed. (EOF during read.)")
 		}
 		conn.Close()
 		return nil, err
 	}
 	if n != 32 {
-		conn.Close()
-		return nil, errors.New("Signature could not be read. Insufficient bytes. Connection closed.")
+		// digitalocean makes this happen, needs this fix
+		offset := n
+		for offset < 32 {
+			n, err = conn.Read(signature[offset:])
+			if err != nil {
+				conn.Close()
+				if err == io.EOF {
+					return nil, errors.New("Signature could not be read. Insufficient bytes. Connection closed. (" + intToStr(offset+n) + " bytes read; 32 expected.)")
+				}
+				return nil, err
+			}
+			offset += n
+		}
 	}
 
 	hasher := hmac.New(sha256.New, self.hmacKey)
@@ -655,6 +698,23 @@ func (self *WNetConnection) PullBytes(plaintext []byte, ciphertext []byte) (int,
 
 func intToStr(ii int) string {
 	return strconv.FormatInt(int64(ii), 10)
+}
+
+// just for counting so we know how much memory to allocate
+func countIntSize(ii int) int {
+	if ii == 0 {
+		return 1
+	}
+	numBytes := 1
+	for ii != 0 {
+		numBytes++
+		ii >>= 8
+	}
+	return numBytes
+}
+
+func countStringSize(stln int) int {
+	return countIntSize(stln) + stln
 }
 
 func NameOfColType(colType int) string {
@@ -813,17 +873,38 @@ func (self *XWRPC) AddRowColumnByteArray(param []byte) error {
 }
 
 func (self *XWRPC) MarshallDB() error {
-	self.message = make([]byte, 2, 1024)
+	// First we calculate the space required, because we can, then we allocate exactly that space.
+	spaceRequired := countStringSize(len(self.dbname)) + 4
+	tblCount := len(self.tables)
+	for tblNum := 0; tblNum < tblCount; tblNum++ {
+		spaceRequired += 1 + countStringSize(len(self.tables[tblNum].name))
+		numColumns := len(self.tables[tblNum].columns)
+		spaceRequired += countIntSize(numColumns)
+		numRows := len(self.tables[tblNum].rows)
+		spaceRequired += countIntSize(numRows)
+		for colNum := 0; colNum < numColumns; colNum++ {
+			spaceRequired += countStringSize(len(self.tables[tblNum].columns[colNum].name)) + 1
+		}
+		for rowNum := 0; rowNum < numRows; rowNum++ {
+			if len(self.tables[tblNum].rows[rowNum]) != numColumns {
+				return errors.New("Wrong number of columns in row " + intToStr(rowNum) + ". Cannot marshall.")
+			}
+			for colNum := 0; colNum < numColumns; colNum++ {
+				spaceRequired += len(self.tables[tblNum].rows[rowNum][colNum])
+			}
+		}
+	}
+
+	self.message = make([]byte, 2, spaceRequired)
 	self.message[0] = 'V'
 	self.message[1] = 0
 	self.message = append(self.message, 'D')
 	self.message = append(self.message, MakeBlockString(self.dbname)...)
 	self.message = append(self.message, byte(self.dbversion))
 
-	tblCount := len(self.tables)
+	tblCount = len(self.tables)
 	for tblNum := 0; tblNum < tblCount; tblNum++ {
-		self.message = append(self.message, []byte("T")...)
-
+		self.message = append(self.message, 'T')
 		self.message = append(self.message, MakeBlockString(self.tables[tblNum].name)...)
 		numColumns := len(self.tables[tblNum].columns)
 		// self.message = append(self.message, MakeBlockInt(numColumns)...)
@@ -831,12 +912,10 @@ func (self *XWRPC) MarshallDB() error {
 		numRows := len(self.tables[tblNum].rows)
 		// self.message = append(self.message, MakeBlockUint64(uint64(numRows))...)
 		self.message = append(self.message, EncodeInt(int64(numRows))...)
-
 		for colNum := 0; colNum < numColumns; colNum++ {
 			self.message = append(self.message, MakeBlockString(self.tables[tblNum].columns[colNum].name)...)
 			self.message = append(self.message, byte(self.tables[tblNum].columns[colNum].colType))
 		}
-
 		for rowNum := 0; rowNum < numRows; rowNum++ {
 			if len(self.tables[tblNum].rows[rowNum]) != numColumns {
 				return errors.New("Wrong number of columns in row " + intToStr(rowNum) + ". Cannot marshall.")
@@ -846,6 +925,7 @@ func (self *XWRPC) MarshallDB() error {
 			}
 		}
 	}
+
 	return nil
 }
 
